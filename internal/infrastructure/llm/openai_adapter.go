@@ -16,9 +16,10 @@ type OpenAIAdapter struct {
 }
 
 type Config struct {
-	APIKey  string
-	BaseURL string
-	Model   string
+	APIKey         string
+	BaseURL        string
+	Model          string
+	EmbeddingModel string
 }
 
 func NewOpenAIAdapter(cfg *Config) *OpenAIAdapter {
@@ -67,7 +68,7 @@ func (a *OpenAIAdapter) Embed(ctx context.Context, texts []string) ([][]float32,
 		ctx,
 		openai.EmbeddingRequest{
 			Input: texts,
-			Model: openai.SmallEmbedding3, // 默认用这个，如果是 DeepSeek 需查阅文档是否支持
+			Model: openai.EmbeddingModel(a.config.EmbeddingModel), // 默认用这个，如果是 DeepSeek 需查阅文档是否支持
 		},
 	)
 	if err != nil {

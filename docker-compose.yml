@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16  # 使用官方带 pgvector 插件的镜像
+    container_name: go_nexus_db
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus_password
+      POSTGRES_DB: nexus_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - nexus_net
+
+networks:
+  nexus_net:
+
+volumes:
+  pg_data:

@@ -2,7 +2,7 @@ server:
   port: ":8080"
 
 llm:
-  provider: "deepseek" # 方便后续扩展
+  provider: "qwen" # 方便后续扩展
   api_key: "sk-9073aeb278f44406bf6c8d0f24bd803e" # 请填入你重新生成的新 Key
   base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1" # DeepSeek 官方 API 地址
   model_name: "qwen3-max"

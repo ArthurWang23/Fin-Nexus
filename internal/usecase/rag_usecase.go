@@ -30,8 +30,7 @@ func NewRAGUseCase(
 func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 	// 构建消息历史，for now 只发一条，后续对接 redis 历史
 	history := []domain.Message{
-		Role:    domain.RoleUser,
-		Content: msg,
+		{Role: domain.RoleUser, Content: msg},
 	}
 
 	response, err := uc.llm.Chat(ctx, history)

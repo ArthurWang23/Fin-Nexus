@@ -27,12 +27,31 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		return
 	}
 
-	answer, err := h.ragUc.Chat(c.Request.Context(), req.Message)
+	answer, err := h.ragUc.SearchAndChat(c.Request.Context(), req.Message)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"response": answer,
+	})
+}
+
+// 测试 handler
+func (h *ChatHandler) AddKnowledge(c *gin.Context) {
+	type Req struct {
+		Text string `json:"text"`
+	}
+	var req Req
+	if err := c.ShouldBindJSON(&req); err != nil {
+		return
+	}
+	err := h.ragUc.AddDocumentText(c.Request.Context(), req.Text)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status": "indexed",
 	})
 }

@@ -3,6 +3,7 @@ package usecase
 import (
 	"context"
 	"fmt"
+	"github.com/google/uuid"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
@@ -68,4 +69,58 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, 
 		{Role: domain.RoleUser, Content: query},
 	}
 	return uc.llm.Chat(ctx, history)
+}
+
+func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string) error {
+	// 创建文档记录
+	docID := uuid.New().String()
+	doc := domain.Document{
+		ID:     docID,
+		Type:   "text",
+		Name:   "Manual Text Upload",
+		Status: domain.StatusProcessing,
+	}
+	if err := uc.docRepo.Create(ctx, &doc); err != nil {
+		return err
+	}
+
+	const chunkSize = 200
+	var chunks []*domain.DocumentChunk
+
+	runes := []rune(text)
+	for i := 0; i < len(runes); i += chunkSize {
+		end := i + chunkSize
+		if end > len(runes) {
+			end = len(runes)
+		}
+		content := string(runes[i:end])
+		chunks = append(chunks, &domain.DocumentChunk{
+			ID:         uuid.New().String(),
+			DocumentID: docID,
+			Content:    content,
+			PageNumber: 1,
+		})
+	}
+
+	// 计算向量
+	var texts []string
+	for _, c := range chunks {
+		texts = append(texts, c.Content)
+	}
+	vectors, err := uc.llm.Embed(ctx, texts)
+	if err != nil {
+		return fmt.Errorf("embedding failed: %w", err)
+	}
+
+	if len(chunks) != len(vectors) {
+		return fmt.Errorf("vector count mismatch")
+	}
+	for i, vec := range vectors {
+		chunks[i].Vector = vec
+	}
+
+	if err := uc.vectorRepo.StoreChunks(ctx, chunks); err != nil {
+		return err
+	}
+	return uc.docRepo.UpdateStatus(ctx, docID, domain.StatusIndexed)
 }

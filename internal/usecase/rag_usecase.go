@@ -3,10 +3,12 @@ package usecase
 import (
 	"context"
 	"fmt"
-	"github.com/google/uuid"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
+	"strings"
+
+	"github.com/google/uuid"
 )
 
 type RAGUseCase struct {
@@ -53,10 +55,23 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, 
 	if err != nil {
 		return "", fmt.Errorf("vector search error: %w", err)
 	}
+	// 🔥 DEBUG 重点：打印检索到的块
+	fmt.Printf("🔍 [Debug] User Query: %s\n", query)
+	fmt.Printf("🔍 [Debug] Found %d chunks\n", len(chunks))
 
+	contextText := ""
+	for i, chunk := range chunks {
+		// 打印每个块的内容，确认是否有意义
+		fmt.Printf("   Chunk %d: %s (ID: %s)\n", i, chunk.Content[:min(50, len(chunk.Content))], chunk.ID)
+		contextText += chunk.Content + "\n---\n"
+	}
+
+	// 如果没有找到块，或者内容为空
+	if contextText == "" {
+		fmt.Println("⚠️ [Debug] Retrieval result is EMPTY. LLM will likely say 'I don't know'.")
+	}
 	// 构建提示词 (Prompt Engineering)
 	// 将检索到的知识拼接给 AI
-	contextText := ""
 	for _, chunk := range chunks {
 		contextText += chunk.Content + "\n---\n"
 	}
@@ -71,36 +86,19 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, 
 	return uc.llm.Chat(ctx, history)
 }
 
-func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string) error {
+func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename string) error {
 	// 创建文档记录
 	docID := uuid.New().String()
 	doc := domain.Document{
 		ID:     docID,
 		Type:   "text",
-		Name:   "Manual Text Upload",
+		Name:   filename,
 		Status: domain.StatusProcessing,
 	}
 	if err := uc.docRepo.Create(ctx, &doc); err != nil {
 		return err
 	}
-
-	const chunkSize = 200
-	var chunks []*domain.DocumentChunk
-
-	runes := []rune(text)
-	for i := 0; i < len(runes); i += chunkSize {
-		end := i + chunkSize
-		if end > len(runes) {
-			end = len(runes)
-		}
-		content := string(runes[i:end])
-		chunks = append(chunks, &domain.DocumentChunk{
-			ID:         uuid.New().String(),
-			DocumentID: docID,
-			Content:    content,
-			PageNumber: 1,
-		})
-	}
+	chunks := uc.smartSplit(docID, text, filename, 500)
 
 	// 计算向量
 	var texts []string
@@ -123,4 +121,41 @@ func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string) error {
 		return err
 	}
 	return uc.docRepo.UpdateStatus(ctx, docID, domain.StatusIndexed)
+}
+
+// 按行分隔并合并
+func (uc *RAGUseCase) smartSplit(docID, text, filename string, chunkSize int) []*domain.DocumentChunk {
+	var chunks []*domain.DocumentChunk
+
+	lines := strings.Split(text, "\n")
+	var currentChunk strings.Builder
+	prefix := fmt.Sprintf("《来源文档：%s》\n", filename)
+	currentChunk.WriteString(prefix)
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if currentChunk.Len()+len(line) > chunkSize {
+			chunks = append(chunks, &domain.DocumentChunk{
+				ID:         uuid.New().String(),
+				DocumentID: docID,
+				Content:    currentChunk.String(),
+				PageNumber: 1, // 暂未处理页码
+			})
+			currentChunk.Reset()
+			currentChunk.WriteString(prefix) // 新块也要加前缀！
+		}
+		currentChunk.WriteString(line)
+		currentChunk.WriteString("\n")
+	}
+	if currentChunk.Len() > len(prefix) {
+		chunks = append(chunks, &domain.DocumentChunk{
+			ID:         uuid.New().String(),
+			DocumentID: docID,
+			Content:    currentChunk.String(),
+			PageNumber: 1,
+		})
+	}
+	return chunks
 }

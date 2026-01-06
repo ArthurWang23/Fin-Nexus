@@ -46,7 +46,7 @@ func (h *ChatHandler) AddKnowledge(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		return
 	}
-	err := h.ragUc.AddDocumentText(c.Request.Context(), req.Text)
+	err := h.ragUc.AddDocumentText(c.Request.Context(), req.Text, "test_text")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

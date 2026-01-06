@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
-	"go-nexus/internal/delivery/http"
+	v1 "go-nexus/internal/delivery/http/v1"
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/infrastructure/persistence"
 	"go-nexus/internal/usecase"
@@ -35,14 +35,17 @@ func main() {
 	llmClient := llm.NewOpenAIAdapter(llmConfig)
 
 	ragService := usecase.NewRAGUseCase(repo, repo, llmClient)
+	ingestService := usecase.NewIngestService(ragService, 5)
 
-	chatHandler := http.NewChatHandler(ragService)
+	chatHandler := v1.NewChatHandler(ragService)
+	uploadHandler := v1.NewUploadHandler(ingestService)
 
 	r := gin.Default()
 	api := r.Group("/api/v1")
 	{
 		api.POST("/chat", chatHandler.Chat)
 		api.POST("/knowledge", chatHandler.AddKnowledge)
+		api.POST("/upload", uploadHandler.Upload)
 	}
 	port := viper.GetString("server.port")
 	fmt.Printf("Server running on port %s\n", port)

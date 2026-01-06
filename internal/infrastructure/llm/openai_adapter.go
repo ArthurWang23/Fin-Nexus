@@ -64,20 +64,28 @@ func (a *OpenAIAdapter) Chat(ctx context.Context, history []domain.Message) (str
 
 // Embed 实现向量化
 func (a *OpenAIAdapter) Embed(ctx context.Context, texts []string) ([][]float32, error) {
-	resp, err := a.client.CreateEmbeddings(
-		ctx,
-		openai.EmbeddingRequest{
-			Input: texts,
-			Model: openai.EmbeddingModel(a.config.EmbeddingModel), // 默认用这个，如果是 DeepSeek 需查阅文档是否支持
-		},
-	)
-	if err != nil {
-		return nil, err
+	const maxBatchSize = 10
+	var allResults [][]float32
+	// 将文本列表分成多个批次
+	for i := 0; i < len(texts); i += maxBatchSize {
+		end := i + maxBatchSize
+		if end > len(texts) {
+			end = len(texts)
+		}
+		batch := texts[i:end]
+		resp, err := a.client.CreateEmbeddings(
+			ctx,
+			openai.EmbeddingRequest{
+				Input: batch,
+				Model: openai.EmbeddingModel(a.config.EmbeddingModel), // 默认用这个，如果是 DeepSeek 需查阅文档是否支持
+			},
+		)
+		if err != nil {
+			return nil, err
+		}
+		for _, data := range resp.Data {
+			allResults = append(allResults, data.Embedding)
+		}
 	}
-
-	var results [][]float32
-	for _, data := range resp.Data {
-		results = append(results, data.Embedding)
-	}
-	return results, nil
+	return allResults, nil
 }

@@ -2,9 +2,9 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
-
-	"github.com/sashabaranov/g
+	"github.com/sashabaranov/go-openai"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 )
@@ -89,6 +89,59 @@ func (a *OpenAIAdapter) Embed(ctx context.Context, texts []string) ([][]float32,
 	return allResults, nil
 }
 
-func (a *OpenAIAdapter) ChatWithTools(ctx context.Context, history []domain.Message, tools gateway.ToolDefinition) (*gateway.LLMResponse, error) {
+func (a *OpenAIAdapter) ChatWithTools(ctx context.Context, history []domain.Message, tools []gateway.ToolDefinition) (*gateway.LLMResponse, error) {
+	var messages []openai.ChatCompletionMessage
 
+	for _, msg := range history {
+		role := string(msg.Role)
+		// 注意：如果是 Tool 类型的消息（Agent loop 回传结果时），
+		// OpenAI 要求必须带上 ToolCallID，这里 Sprint 4 简化演示，
+		// 我们主要关注 User -> Assistant 的第一轮调用。
+		// 在完整 Agent 中，这里需要更复杂的转换逻辑。
+		messages = append(messages, openai.ChatCompletionMessage{
+			Role:    string(role),
+			Content: msg.Content,
+		})
+	}
+
+	// 转换工具定义 Go struct -> Openai tool
+	var openaiTools []openai.Tool
+	for _, t := range tools {
+		openaiTools = append(openaiTools, openai.Tool{
+			Type: openai.ToolTypeFunction,
+			Function: &openai.FunctionDefinition{
+				Name:        t.Name,
+				Description: t.Description,
+				Parameters:  json.RawMessage(t.Parameters),
+			},
+		})
+	}
+
+	resp, err := a.client.CreateChatCompletion(ctx, openai.ChatCompletionRequest{
+		Model:    a.config.Model,
+		Messages: messages,
+		Tools:    openaiTools,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if len(resp.Choices) == 0 {
+		return nil, fmt.Errorf("empty response from llm")
+	}
+
+	msg := resp.Choices[0].Message
+
+	result := &gateway.LLMResponse{
+		Content: msg.Content,
+	}
+	if len(msg.ToolCalls) > 0 {
+		for _, call := range msg.ToolCalls {
+			result.ToolCalls = append(result.ToolCalls, gateway.ToolCall{
+				ID:   call.ID,
+				Name: call.Function.Name,
+				Args: call.Function.Arguments,
+			})
+		}
+	}
+	return result, nil
 }

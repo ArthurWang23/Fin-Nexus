@@ -36,16 +36,17 @@ func main() {
 
 	ragService := usecase.NewRAGUseCase(repo, repo, llmClient)
 	ingestService := usecase.NewIngestService(ragService, 5)
-
+	agentService := usecase.NewAgentUseCase(llmClient)
 	chatHandler := v1.NewChatHandler(ragService)
 	uploadHandler := v1.NewUploadHandler(ingestService)
-
+	agentHandler := v1.NewAgentHandler(agentService)
 	r := gin.Default()
 	api := r.Group("/api/v1")
 	{
 		api.POST("/chat", chatHandler.Chat)
 		api.POST("/knowledge", chatHandler.AddKnowledge)
 		api.POST("/upload", uploadHandler.Upload)
+		api.POST("/agent", agentHandler.Chat)
 	}
 	port := viper.GetString("server.port")
 	fmt.Printf("Server running on port %s\n", port)

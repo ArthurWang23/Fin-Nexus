@@ -4,10 +4,9 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/sashabaranov/g
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
-
-	"github.com/sashabaranov/go-openai"
 )
 
 type OpenAIAdapter struct {
@@ -88,4 +87,8 @@ func (a *OpenAIAdapter) Embed(ctx context.Context, texts []string) ([][]float32,
 		}
 	}
 	return allResults, nil
+}
+
+func (a *OpenAIAdapter) ChatWithTools(ctx context.Context, history []domain.Message, tools gateway.ToolDefinition) (*gateway.LLMResponse, error) {
+
 }

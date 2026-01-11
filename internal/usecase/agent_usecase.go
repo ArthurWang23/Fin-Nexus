@@ -7,6 +7,7 @@ import (
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/tools"
+	"go.opentelemetry.io/otel"
 )
 
 // Reasoning + Acting 循环
@@ -19,6 +20,10 @@ func NewAgentUseCase(llm gateway.LLMClient) *AgentUseCase {
 }
 
 func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (string, error) {
+	tracer := otel.Tracer("go-nexus")
+	ctx, span := tracer.Start(ctx, "AgentUseCase.ChatWithAgent")
+	defer span.End()
+
 	toolDefs := []gateway.ToolDefinition{
 		{
 			Name:        "get_order_info",
@@ -33,7 +38,9 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 	}
 
 	fmt.Println("Agent: Thinking...")
+	_, spanLLM := tracer.Start(ctx, "LLM.Thinking")
 	resp, err := uc.llm.ChatWithTools(ctx, history, toolDefs)
+	spanLLM.End()
 	if err != nil {
 		return "", err
 	}
@@ -47,6 +54,7 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 	// 这里简化处理：我们不把复杂的 ToolCall 结构回传，而是直接进入下一轮观察
 	for _, call := range resp.ToolCalls {
 		if call.Name == "get_order_info" {
+			_, spanTool := tracer.Start(ctx, "Tool.GetOrderInfo")
 			var args struct {
 				OrderID string `json:"order_id"`
 			}
@@ -55,6 +63,7 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 			}
 			fmt.Printf("Agent: Calling Tool [GetOrderInfo] with ID: %s\n", args.OrderID)
 			toolResult := tools.GetOrderInfo(args.OrderID)
+			spanTool.End()
 			// 将工具结果作为一条新消息告诉 LLM
 			// 提示词工程技巧：明确告诉 LLM 这是工具执行的结果
 			toolFeedback := fmt.Sprintf("【工具执行结果】: %s\n请根据以上结果回答用户。", toolResult)
@@ -65,6 +74,8 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 		}
 	}
 	fmt.Println("Agent: Summarizing result...")
+	_, spanFinal := tracer.Start(ctx, "LLM.Summarize")
 	finalAnswer, err := uc.llm.Chat(ctx, history)
+	spanFinal.End()
 	return finalAnswer, err
 }

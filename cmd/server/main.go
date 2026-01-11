@@ -1,24 +1,57 @@
 package main
 
 import (
+	"context"
 	"fmt"
-	"github.com/gin-gonic/gin"
-	"github.com/spf13/viper"
 	v1 "go-nexus/internal/delivery/http/v1"
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/infrastructure/persistence"
 	"go-nexus/internal/usecase"
 	"go-nexus/pkg/database"
+	"go-nexus/pkg/telemetry"
 	"log"
+	"os"
+
+	"github.com/gin-gonic/gin"
+	"github.com/spf13/viper"
 )
 
 func main() {
-	viper.SetConfigFile("configs/config.yaml")
+	// 初始化 Jaeger 追踪
+	jaegerEndpoint := os.Getenv("JAEGER_ENDPOINT")
+	if jaegerEndpoint == "" {
+		jaegerEndpoint = "localhost:4318"
+	}
+	shutdown := telemetry.InitTracer("go-nexus-service", jaegerEndpoint)
+	defer func() {
+		if err := shutdown(context.Background()); err != nil {
+			log.Printf("Error shutting down tracer: %v", err)
+		}
+	}()
+
+	// 加载配置文件（支持通过环境变量指定配置文件路径）
+	configPath := os.Getenv("CONFIG_PATH")
+	if configPath == "" {
+		configPath = "configs/config.yaml"
+	}
+	viper.SetConfigFile(configPath)
 	if err := viper.ReadInConfig(); err != nil {
-		log.Fatalf("Error reading config file: %s", err)
+		log.Printf("Warning: Error reading config file: %s, using environment variables only", err)
 	}
 
-	dsn := fmt.Sprintf("host=localhost user=nexus password=nexus_password dbname=nexus_db port=5432 sslmode=disable")
+	// 支持环境变量覆盖配置
+	viper.AutomaticEnv()
+	viper.SetEnvPrefix("")
+
+	// 配置数据库连接（优先使用环境变量，适合 Docker 环境）
+	dbHost := getEnvOrDefault("DB_HOST", "localhost")
+	dbUser := getEnvOrDefault("DB_USER", "nexus")
+	dbPassword := getEnvOrDefault("DB_PASSWORD", "nexus_password")
+	dbName := getEnvOrDefault("DB_NAME", "nexus_db")
+	dbPort := getEnvOrDefault("DB_PORT", "5432")
+	dsn := fmt.Sprintf("host=%s user=%s password=%s dbname=%s port=%s sslmode=disable",
+		dbHost, dbUser, dbPassword, dbName, dbPort)
+
 	db := database.NewPostgresDB(dsn)
 	err := db.AutoMigrate(&database.DocumentModel{}, &database.DocumentChunkModel{})
 	if err != nil {
@@ -26,11 +59,12 @@ func main() {
 	}
 	repo := persistence.NewPostgresRepo(db)
 
+	// 配置 LLM（优先使用环境变量，适合 Docker 环境）
 	llmConfig := &llm.Config{
-		APIKey:         viper.GetString("llm.api_key"),
-		BaseURL:        viper.GetString("llm.base_url"),
-		Model:          viper.GetString("llm.model_name"),
-		EmbeddingModel: viper.GetString("llm.embedding_model"),
+		APIKey:         getEnvOrDefault("LLM_API_KEY", viper.GetString("llm.api_key")),
+		BaseURL:        getEnvOrDefault("LLM_BASE_URL", viper.GetString("llm.base_url")),
+		Model:          getEnvOrDefault("LLM_MODEL", viper.GetString("llm.model_name")),
+		EmbeddingModel: getEnvOrDefault("LLM_EMBEDDING_MODEL", viper.GetString("llm.embedding_model")),
 	}
 	llmClient := llm.NewOpenAIAdapter(llmConfig)
 
@@ -48,9 +82,25 @@ func main() {
 		api.POST("/upload", uploadHandler.Upload)
 		api.POST("/agent", agentHandler.Chat)
 	}
-	port := viper.GetString("server.port")
+
+	// 服务器端口（优先使用环境变量）
+	port := getEnvOrDefault("SERVER_PORT", viper.GetString("server.port"))
+	if port == "" {
+		port = ":8080"
+	}
+	if port[0] != ':' {
+		port = ":" + port
+	}
 	fmt.Printf("Server running on port %s\n", port)
 	if err := r.Run(port); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// getEnvOrDefault 获取环境变量，如果不存在则返回默认值
+func getEnvOrDefault(key, defaultValue string) string {
+	if value := os.Getenv(key); value != "" {
+		return value
+	}
+	return defaultValue
 }

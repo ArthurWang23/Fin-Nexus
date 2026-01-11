@@ -3,6 +3,7 @@ package v1
 import (
 	"github.com/gin-gonic/gin"
 	"go-nexus/internal/usecase"
+	"go.opentelemetry.io/otel"
 	"net/http"
 )
 
@@ -20,7 +21,10 @@ func (h *AgentHandler) Chat(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	answer, err := h.agentUC.ChatWithAgent(c.Request.Context(), req.Message)
+	tracer := otel.Tracer("http-handler")
+	ctx, span := tracer.Start(c.Request.Context(), "HTTP POST /agent")
+	defer span.End()
+	answer, err := h.agentUC.ChatWithAgent(ctx, req.Message)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

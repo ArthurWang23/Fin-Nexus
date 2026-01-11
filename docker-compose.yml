@@ -1,8 +1,33 @@
 version: '3.8'
 
 services:
+  # 1. 我们的 Go 应用
+  app:
+    build: .
+    container_name: go_nexus_app
+    ports:
+      - "8080:8080"
+    environment:
+      - JAEGER_ENDPOINT=jaeger:4318 # 指向 Jaeger 服务
+      - DB_HOST=postgres
+      - DB_USER=nexus
+      - DB_PASSWORD=nexus_password
+      - DB_NAME=nexus_db
+      - DB_PORT=5432
+      - LLM_API_KEY=sk-9073aeb278f44406bf6c8d0f24bd803e
+      - LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+      - LLM_MODEL=qwen3-max
+      - LLM_EMBEDDING_MODEL=text-embedding-v4
+      - SERVER_PORT=8080
+    depends_on:
+      - postgres
+      - jaeger
+    networks:
+      - nexus_net
+
+  # 2. 数据库 (保持不变)
   postgres:
-    image: pgvector/pgvector:pg16  # 使用官方带 pgvector 插件的镜像
+    image: pgvector/pgvector:pg16
     container_name: go_nexus_db
     environment:
       POSTGRES_USER: nexus
@@ -12,6 +37,16 @@ services:
       - "5432:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data
+    networks:
+      - nexus_net
+
+  # 3. Jaeger (链路追踪 UI + Collector)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: go_nexus_jaeger
+    ports:
+      - "16686:16686" # UI 端口
+      - "4318:4318"   # OTLP HTTP 接收端口
     networks:
       - nexus_net
 

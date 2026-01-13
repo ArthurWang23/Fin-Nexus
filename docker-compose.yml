@@ -19,11 +19,14 @@ services:
       - LLM_MODEL=qwen3-max
       - LLM_EMBEDDING_MODEL=text-embedding-v4
       - SERVER_PORT=8080
+      - DOCKER_API_VERSION=1.41
     depends_on:
       - postgres
       - jaeger
     networks:
       - nexus_net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
 
   # 2. 数据库 (保持不变)
   postgres:
@@ -47,6 +50,18 @@ services:
     ports:
       - "16686:16686" # UI 端口
       - "4318:4318"   # OTLP HTTP 接收端口
+    networks:
+      - nexus_net
+
+  temporal:
+    image: temporalio/admin-tools:latest
+    container_name: temporal
+    ports:
+      - "7233:7233" # grpc 端口
+      - "8233:8088" # Web UI 端口
+    environment:
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+    entrypoint: ["/bin/bash","-c", "temporal server start-dev --ip 0.0.0.0"]
     networks:
       - nexus_net
 

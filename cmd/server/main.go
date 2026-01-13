@@ -7,6 +7,7 @@ import (
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/infrastructure/persistence"
 	"go-nexus/internal/usecase"
+	"go-nexus/internal/usecase/tools"
 	"go-nexus/pkg/database"
 	"go-nexus/pkg/telemetry"
 	"log"
@@ -74,6 +75,10 @@ func main() {
 	chatHandler := v1.NewChatHandler(ragService)
 	uploadHandler := v1.NewUploadHandler(ingestService)
 	agentHandler := v1.NewAgentHandler(agentService)
+
+	if err := tools.InitPythonTool(); err != nil {
+		log.Fatalf("Failed to init python tool (is Docker running?): %v", err)
+	}
 	r := gin.Default()
 	api := r.Group("/api/v1")
 	{

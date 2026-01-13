@@ -7,6 +7,7 @@ import (
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/tools"
+
 	"go.opentelemetry.io/otel"
 )
 
@@ -30,10 +31,14 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 			Description: "查询电商订单的物流状态和详情",
 			Parameters:  tools.GetOrderToolSchema(),
 		},
+		{
+			Name:        "run_python_code",
+			Description: "Execute Python code to perform calculations, loop logic, or text processing.",
+			Parameters:  tools.GetPythonToolSchema(),
+		},
 	}
-
 	history := []domain.Message{
-		{Role: domain.RoleSystem, Content: "你是一个电商智能助手。如果用户查询订单，请调用工具。其他问题直接回答。"},
+		{Role: domain.RoleSystem, Content: "你是一个智能助手。你可以调用工具查看电商订单状态，或者编写 Python 脚本运行并解决各种问题。其他问题直接回答。"},
 		{Role: domain.RoleUser, Content: userQuery},
 	}
 
@@ -63,12 +68,33 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 			}
 			fmt.Printf("Agent: Calling Tool [GetOrderInfo] with ID: %s\n", args.OrderID)
 			toolResult := tools.GetOrderInfo(args.OrderID)
+			fmt.Printf(" Agent: Docker Output: [%s]\n", toolResult)
 			spanTool.End()
 			// 将工具结果作为一条新消息告诉 LLM
 			// 提示词工程技巧：明确告诉 LLM 这是工具执行的结果
 			toolFeedback := fmt.Sprintf("【工具执行结果】: %s\n请根据以上结果回答用户。", toolResult)
 			history = append(history, domain.Message{
 				Role:    domain.RoleUser, // 这里用 User 伪装工具结果最通用，不用担心模型对 RoleTool 的兼容性
+				Content: toolFeedback,
+			})
+		}
+		if call.Name == "run_python_code" {
+			_, spanTool := tracer.Start(ctx, "Tool.RunPythonCode")
+			var args struct {
+				Code string `json:"code"`
+			}
+			// JSON Unmarshal 处理代码换行符
+			if err := json.Unmarshal([]byte(call.Args), &args); err != nil {
+				return "", fmt.Errorf("invalid tool args: %v", err)
+			}
+
+			// 执行 Docker 沙箱
+			toolResult := tools.RunPythonCode(args.Code)
+			fmt.Printf("Agent: Docker Output: [%s]\n", toolResult)
+			spanTool.End()
+			toolFeedback := fmt.Sprintf("【代码执行结果】:\n%s", toolResult)
+			history = append(history, domain.Message{
+				Role:    domain.RoleUser, // 用 User 角色注入结果最兼容
 				Content: toolFeedback,
 			})
 		}

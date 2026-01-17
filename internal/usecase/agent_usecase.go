@@ -1,23 +1,62 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/tools"
+	"strings"
+	"text/template"
+	"time"
 
 	"go.opentelemetry.io/otel"
 )
 
+const (
+	// 主管：负责路由
+	PromptSupervisor = `你是一个以结果为导向的项目主管。你有两个得力下属：
+1. [Researcher]: 擅长查阅知识库文档，回答基于事实的问题。
+2. [Coder]: 擅长编写 Python 代码进行数学计算、数据分析、绘图或字符串处理。
+
+用户的请求是：{{.Query}}
+
+请分析请求，严格按照 JSON 格式输出下一步决策。
+- 如果需要查资料，NextAgent 填 "Researcher"。
+- 如果需要计算或写代码，NextAgent 填 "Coder"。
+- 如果任务已完成或可以直接回答，NextAgent 填 "FINISH"，并在 FinalAnswer 中回复用户。
+
+JSON 示例:
+{
+    "thought": "用户想画图，但我还没有数据，需要先查数据",
+    "next_agent": "Researcher",
+    "instruction": "查询 VLA-0 论文中的性能数据",
+    "final_answer": ""
+}
+`
+	PromptResearcher = `你是 Researcher。你的唯一任务是利用工具查阅文档库。
+请根据主管的指令行动。不要自己编造事实。查不到就说查不到。`
+	PromptCoder = `你是 Coder。你的唯一任务是编写正确的 Python 代码解决问题。
+代码将在沙箱中运行，请确保代码包含 print() 输出结果。`
+)
+
 // Reasoning + Acting 循环
 type AgentUseCase struct {
-	llm gateway.LLMClient
+	llm   gateway.LLMClient
+	ragUC *RAGUseCase
 }
 
-func NewAgentUseCase(llm gateway.LLMClient) *AgentUseCase {
-	return &AgentUseCase{llm: llm}
+type SupervisorDecision struct {
+	Thought     string `json:"thought"`     // 思考过程
+	NextAgent   string `json:"next_agent"`  // 下一步交给谁
+	Instruction string `json:"instruction"` // 给出的下一步指令
+	FinalAnswer string `json:"final_answer"`
+}
+
+func NewAgentUseCase(llm gateway.LLMClient, ragUC *RAGUseCase) *AgentUseCase {
+	return &AgentUseCase{llm: llm, ragUC: ragUC}
 }
 
 func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (string, error) {
@@ -104,4 +143,119 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 	finalAnswer, err := uc.llm.Chat(ctx, history)
 	spanFinal.End()
 	return finalAnswer, err
+}
+
+func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string) (string, error) {
+	history := []domain.Message{}
+
+	maxSteps := 5
+	for i := 0; i < maxSteps; i++ {
+		fmt.Printf("\n--- Step %d: Supervisor is thinking ---\n", i+1)
+		// make decision
+		decision, err := uc.CallSupervisor(ctx, userQuery, history)
+		if err != nil {
+			return "", err
+		}
+		fmt.Printf(" Supervisor Decision: %s -> %s\n", decision.NextAgent, decision.Instruction)
+
+		if decision.NextAgent == "FINISH" {
+			return decision.FinalAnswer, nil
+		}
+
+		var workResult string
+		switch decision.NextAgent {
+		case "Researcher":
+			workResult, err = uc.RunResearcher(ctx, decision.Instruction)
+		case "Coder":
+			workResult, err = uc.RunCoder(ctx, decision.Instruction)
+		default:
+			return "", fmt.Errorf("unknown agent: %s", decision.NextAgent)
+		}
+
+		if err != nil {
+			workResult = fmt.Sprintf("Error executing task: %v", err)
+		}
+		history = append(history, domain.Message{
+			Role:    domain.RoleUser, // 对主管来说，下属的汇报也可以看作一种输入
+			Content: fmt.Sprintf("【%s 的汇报】:\n%s", decision.NextAgent, workResult),
+		})
+	}
+	return "任务执行步骤过多，已被强制终止。", nil
+}
+
+func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, history []domain.Message) (*SupervisorDecision, error) {
+	tmpl, _ := template.New("sys").Parse(PromptSupervisor)
+	var buf bytes.Buffer
+	tmpl.Execute(&buf, map[string]string{"Query": query})
+
+	msgs := []domain.Message{
+		{Role: domain.RoleSystem, Content: buf.String()},
+	}
+	msgs = append(msgs, history...)
+	// supervisor 不使用tool
+	resp, err := uc.llm.Chat(ctx, msgs)
+	if err != nil {
+		return nil, err
+	}
+	cleanJSON := cleanJSONBlock(resp)
+
+	var decision SupervisorDecision
+	if err := json.Unmarshal([]byte(cleanJSON), &decision); err != nil {
+		fmt.Printf("JSON Parse Error: %s\nOriginal: %s\n", err, resp)
+		return nil, fmt.Errorf("supervisor output format error")
+	}
+	return &decision, nil
+}
+
+func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string) (string, error) {
+	fmt.Printf("Researcher is searching: %s\n", instruction)
+	time.Sleep(30 * time.Second)
+
+	return uc.ragUC.SearchOnly(ctx, instruction) // 只检索不Chat
+}
+
+func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (string, error) {
+	fmt.Printf("Coder is working on: %s\n", instruction)
+	toolsDefs := []gateway.ToolDefinition{
+		{
+			Name:        "run_python_code",
+			Description: "Execute Python code.",
+			Parameters:  tools.GetPythonToolSchema(),
+		},
+	}
+	msgs := []domain.Message{
+		{Role: domain.RoleSystem, Content: PromptCoder},
+		{Role: domain.RoleUser, Content: instruction},
+	}
+
+	resp, err := uc.llm.ChatWithTools(ctx, msgs, toolsDefs)
+	if err != nil {
+		return "", err
+	}
+	if len(resp.ToolCalls) == 0 {
+		return resp.Content, nil // 可能不需要写代码
+	}
+	// 执行工具
+	var sb strings.Builder
+	for _, call := range resp.ToolCalls {
+		if call.Name == "run_python_code" {
+			var args struct {
+				Code string `json:"code"`
+			}
+			_ = json.Unmarshal([]byte(call.Args), &args)
+
+			// 真正执行
+			output := tools.RunPythonCode(args.Code)
+			sb.WriteString(fmt.Sprintf("Code:\n%s\nOutput:\n%s\n", args.Code, output))
+		}
+	}
+	return sb.String(), nil
+}
+
+func cleanJSONBlock(text string) string {
+	text = strings.TrimSpace(text)
+	text = strings.TrimPrefix(text, "```json")
+	text = strings.TrimPrefix(text, "```")
+	text = strings.TrimSuffix(text, "```")
+	return strings.TrimSpace(text)
 }

@@ -20,9 +20,11 @@ services:
       - LLM_EMBEDDING_MODEL=text-embedding-v4
       - SERVER_PORT=8080
       - DOCKER_API_VERSION=1.41
+      - TEMPORAL_HOST=temporal:7233
     depends_on:
       - postgres
       - jaeger
+      - temporal
     networks:
       - nexus_net
     volumes:
@@ -58,10 +60,10 @@ services:
     container_name: temporal
     ports:
       - "7233:7233" # grpc 端口
-      - "8233:8088" # Web UI 端口
+      - "8088:8088" # Web UI 端口
     environment:
-      - TEMPORAL_CLI_ADDRESS=temporal:7233
-    entrypoint: ["/bin/bash","-c", "temporal server start-dev --ip 0.0.0.0"]
+      - TEMPORAL_CLI_ADDRESS=localhost:7233
+    entrypoint: ["/bin/bash","-c", "temporal server start-dev --ip 0.0.0.0 --ui-port 8088"]
     networks:
       - nexus_net
 

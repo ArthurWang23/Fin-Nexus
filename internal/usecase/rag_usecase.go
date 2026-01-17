@@ -123,6 +123,21 @@ func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename
 	return uc.docRepo.UpdateStatus(ctx, docID, domain.StatusIndexed)
 }
 
+func (uc *RAGUseCase) SearchOnly(ctx context.Context, query string) (string, error) {
+	vectors, _ := uc.llm.Embed(ctx, []string{query})
+	chunks, _ := uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5)
+
+	if len(chunks) == 0 {
+		return "没有找到相关资料。", nil
+	}
+	var buf strings.Builder
+	for _, c := range chunks {
+		buf.WriteString(c.Content)
+		buf.WriteString("\n---\n")
+	}
+	return buf.String(), nil
+}
+
 // 按行分隔并合并
 func (uc *RAGUseCase) smartSplit(docID, text, filename string, chunkSize int) []*domain.DocumentChunk {
 	var chunks []*domain.DocumentChunk

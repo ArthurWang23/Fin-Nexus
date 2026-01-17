@@ -8,8 +8,12 @@ import (
 	"go-nexus/internal/infrastructure/persistence"
 	"go-nexus/internal/usecase"
 	"go-nexus/internal/usecase/tools"
+	"go-nexus/internal/workflow"
+	"go-nexus/internal/workflow/activities"
 	"go-nexus/pkg/database"
 	"go-nexus/pkg/telemetry"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
 	"log"
 	"os"
 
@@ -71,11 +75,35 @@ func main() {
 
 	ragService := usecase.NewRAGUseCase(repo, repo, llmClient)
 	ingestService := usecase.NewIngestService(ragService, 5)
-	agentService := usecase.NewAgentUseCase(llmClient)
+	agentService := usecase.NewAgentUseCase(llmClient, ragService)
 	chatHandler := v1.NewChatHandler(ragService)
 	uploadHandler := v1.NewUploadHandler(ingestService)
-	agentHandler := v1.NewAgentHandler(agentService)
 
+	temporalHost := os.Getenv("TEMPORAL_HOST")
+	if temporalHost == "" {
+		temporalHost = "localhost:7233"
+	}
+
+	tClient, err := client.Dial(client.Options{
+		HostPort: temporalHost,
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer tClient.Close()
+	w := worker.New(tClient, "agent-task-queue", worker.Options{})
+
+	agentActivities := activities.NewAgentActivities(agentService)
+	w.RegisterWorkflow(workflow.MultiAgentWorkflow)
+	w.RegisterActivity(agentActivities.SupervisorDecide)
+	w.RegisterActivity(agentActivities.ResearcherSearch)
+	w.RegisterActivity(agentActivities.CoderRun)
+	go func() {
+		if err := w.Run(worker.InterruptCh()); err != nil {
+			log.Fatalf("Unable to start worker: %v", err)
+		}
+	}()
+	agentHandler := v1.NewAgentHandler(agentService, tClient)
 	if err := tools.InitPythonTool(); err != nil {
 		log.Fatalf("Failed to init python tool (is Docker running?): %v", err)
 	}
@@ -86,6 +114,8 @@ func main() {
 		api.POST("/knowledge", chatHandler.AddKnowledge)
 		api.POST("/upload", uploadHandler.Upload)
 		api.POST("/agent", agentHandler.Chat)
+		api.POST("/multi-agent", agentHandler.MultiChat)
+		api.POST("/async-chat", agentHandler.AsyncChat)
 	}
 
 	// 服务器端口（优先使用环境变量）

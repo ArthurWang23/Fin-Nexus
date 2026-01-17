@@ -116,6 +116,7 @@ func main() {
 		api.POST("/agent", agentHandler.Chat)
 		api.POST("/multi-agent", agentHandler.MultiChat)
 		api.POST("/async-chat", agentHandler.AsyncChat)
+		api.POST("/agent-approve", agentHandler.Approve)
 	}
 
 	// 服务器端口（优先使用环境变量）

@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+const SignalApprove = "APPROVE_SIGNAL"
+
 func MultiAgentWorkflow(ctx workflow.Context, userQuery string) (string, error) {
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: 2 * time.Minute,
@@ -42,7 +44,29 @@ func MultiAgentWorkflow(ctx workflow.Context, userQuery string) (string, error) 
 		case "Researcher":
 			err = workflow.ExecuteActivity(ctx, "ResearcherSearch", decision.Instruction).Get(ctx, &workerResult)
 		case "Coder":
-			err = workflow.ExecuteActivity(ctx, "CoderRun", decision.Instruction).Get(ctx, &workerResult)
+			workflow.GetLogger(ctx).Info(" Code execution requested. Waiting for approval...", "code", decision.Instruction)
+			selector := workflow.NewSelector(ctx)
+			approverSignal := workflow.GetSignalChannel(ctx, SignalApprove)
+
+			var approved bool
+			var manualFeedback string // 允许管理员拒绝时附带理由
+
+			selector.AddReceive(approverSignal, func(c workflow.ReceiveChannel, more bool) {
+				var signalVal struct {
+					Approved bool
+					Reason   string
+				}
+				c.Receive(ctx, &signalVal)
+				approved = signalVal.Approved
+				manualFeedback = signalVal.Reason
+			})
+
+			selector.Select(ctx)
+			if approved {
+				err = workflow.ExecuteActivity(ctx, "CoderRun", decision.Instruction).Get(ctx, &workerResult)
+			} else {
+				workerResult = "User REJECTED the code execution request. Reason: " + manualFeedback
+			}
 		}
 		if err != nil {
 			workerResult = "Error: " + err.Error()

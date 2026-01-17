@@ -15,6 +15,12 @@ type AgentHandler struct {
 	tClient client.Client
 }
 
+type ApprovalRequest struct {
+	WorkflowID string `json:"workflow_id" binding:"required"`
+	Approved   bool   `json:"approved"`
+	Reason     string `json:"reason"`
+}
+
 func NewAgentHandler(agentUC *usecase.AgentUseCase, tClient client.Client) *AgentHandler {
 	return &AgentHandler{agentUC: agentUC, tClient: tClient}
 }
@@ -75,4 +81,29 @@ func (h *AgentHandler) AsyncChat(c *gin.Context) {
 		return
 	}
 	c.JSON(200, gin.H{"response": result, "workflow_id": we.GetID()})
+}
+
+func (h *AgentHandler) Approve(c *gin.Context) {
+	var req ApprovalRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	signalVal := struct {
+		Approved bool
+		Reason   string
+	}{
+		Approved: req.Approved,
+		Reason:   req.Reason,
+	}
+	err := h.tClient.SignalWorkflow(c.Request.Context(), req.WorkflowID, "", "APPROVE_SIGNAL", signalVal)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	status := "Approved"
+	if !req.Approved {
+		status = "Rejected"
+	}
+	c.JSON(200, gin.H{"message": "Signal sent: " + status})
 }

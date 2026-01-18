@@ -1,12 +1,17 @@
 package usecase
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"go-nexus/internal/domain"
+	"go-nexus/internal/infrastructure/graph"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
+	"golang.org/x/sync/errgroup"
 	"strings"
+	"text/template"
 
 	"github.com/google/uuid"
 )
@@ -15,17 +20,24 @@ type RAGUseCase struct {
 	docRepo    repo.DocumentRepository
 	vectorRepo repo.VectorRepository
 	llm        gateway.LLMClient
+	graphRepo  *graph.Neo4jRepo
+}
+type GraphExtractionResult struct {
+	Entities  []graph.Entity   `json:"entities"`
+	Relations []graph.Relation `json:"relations"`
 }
 
 func NewRAGUseCase(
 	docRepo repo.DocumentRepository,
 	vecRepo repo.VectorRepository,
 	llm gateway.LLMClient,
+	graphRepo *graph.Neo4jRepo,
 ) *RAGUseCase {
 	return &RAGUseCase{
 		docRepo:    docRepo,
 		vectorRepo: vecRepo,
 		llm:        llm,
+		graphRepo:  graphRepo,
 	}
 }
 
@@ -45,39 +57,63 @@ func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 
 // 带有知识检索的对话
 func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, error) {
-	vectors, err := uc.llm.Embed(ctx, []string{query})
-	if err != nil || len(vectors) == 0 {
-		return "", fmt.Errorf("embedding error: %w", err)
-	}
-	queryVector := vectors[0]
+	var g errgroup.Group
+	var chunks []*domain.DocumentChunk
+	var entities []string
 
-	chunks, err := uc.vectorRepo.SearchSimilar(ctx, queryVector, 3)
-	if err != nil {
-		return "", fmt.Errorf("vector search error: %w", err)
-	}
-	// 🔥 DEBUG 重点：打印检索到的块
-	fmt.Printf("🔍 [Debug] User Query: %s\n", query)
-	fmt.Printf("🔍 [Debug] Found %d chunks\n", len(chunks))
+	g.Go(func() error {
+		vectors, err := uc.llm.Embed(ctx, []string{query})
+		if err != nil {
+			return err
+		}
+		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 3)
+		return err
+	})
 
-	contextText := ""
-	for i, chunk := range chunks {
-		// 打印每个块的内容，确认是否有意义
-		fmt.Printf("   Chunk %d: %s (ID: %s)\n", i, chunk.Content[:min(50, len(chunk.Content))], chunk.ID)
-		contextText += chunk.Content + "\n---\n"
+	g.Go(func() error {
+		var err error
+		entities, err = uc.extractEntities(ctx, query)
+		return err
+	})
+	if err := g.Wait(); err != nil {
+		return "", err
 	}
+	var graphContext []string
+	fmt.Printf(" Extracted Entities: %v\n", entities)
+	for _, entity := range entities {
+		// 查每个实体的一跳邻居
+		knowledge, err := uc.graphRepo.GetRelatedKnowledge(ctx, entity)
+		if err != nil {
+			continue
+		}
+		// 去重合并
+		graphContext = append(graphContext, knowledge...)
+	}
+	graphContext = uniqueStrings(graphContext)
 
-	// 如果没有找到块，或者内容为空
-	if contextText == "" {
-		fmt.Println("⚠️ [Debug] Retrieval result is EMPTY. LLM will likely say 'I don't know'.")
+	var contextBuilder strings.Builder
+	contextBuilder.WriteString("【文档片段】:\n")
+	for _, c := range chunks {
+		contextBuilder.WriteString(c.Content + "\n---\n")
 	}
-	// 构建提示词 (Prompt Engineering)
-	// 将检索到的知识拼接给 AI
-	for _, chunk := range chunks {
-		contextText += chunk.Content + "\n---\n"
+	if len(graphContext) > 0 {
+		contextBuilder.WriteString("\n【知识图谱信息】:\n")
+		// 最多只取前 15 条关系，防止撑爆 Token
+		limit := 15
+		if len(graphContext) < limit {
+			limit = len(graphContext)
+		}
+
+		for _, k := range graphContext[:limit] {
+			contextBuilder.WriteString("- " + k + "\n")
+		}
 	}
-	systemPrompt := fmt.Sprintf(`你是一个智能助手。请根据以下参考资料回答用户问题。如果资料中没有答案，请说不知道。
-	参考资料:
-	%s`, contextText)
+	fmt.Printf(" Final Context: Graph Nodes=%d, Vector Chunks=%d\n", len(graphContext), len(chunks))
+	systemPrompt := fmt.Sprintf(`你是一个智能助手。请结合以下资料回答问题。
+优先基于【知识图谱信息】理清实体间的关系，再结合【文档片段】补充细节。
+
+参考资料:
+%s`, contextBuilder.String())
 
 	history := []domain.Message{
 		{Role: domain.RoleSystem, Content: systemPrompt},
@@ -138,6 +174,40 @@ func (uc *RAGUseCase) SearchOnly(ctx context.Context, query string) (string, err
 	return buf.String(), nil
 }
 
+func (uc *RAGUseCase) BuildGraphFromText(ctx context.Context, text string) error {
+	// 渲染 Prompt
+	tmpl, err := template.New("graph").Parse(PromptExtractGraph)
+	if err != nil {
+		return fmt.Errorf("parse template error: %w", err)
+	}
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, map[string]string{"Text": text}); err != nil {
+		return fmt.Errorf("execute template error: %w", err)
+	}
+
+	// 调用 LLM
+	msgs := []domain.Message{
+		{Role: domain.RoleUser, Content: buf.String()},
+	}
+	resp, err := uc.llm.Chat(ctx, msgs)
+	if err != nil {
+		return fmt.Errorf("llm chat error: %w", err)
+	}
+	cleanJSON := CleanJSONBlock(resp)
+	var result GraphExtractionResult
+	if err := json.Unmarshal([]byte(cleanJSON), &result); err != nil {
+		fmt.Printf(" Graph JSON Parse Error: %v\nResp: %s\n", err, resp)
+		return nil
+	}
+	if len(result.Entities) > 0 || len(result.Relations) > 0 {
+		err = uc.graphRepo.SaveKnowledgeGraph(ctx, result.Entities, result.Relations)
+		if err != nil {
+			return fmt.Errorf("neo4j store failed: %w", err)
+		}
+	}
+	return nil
+}
+
 // 按行分隔并合并
 func (uc *RAGUseCase) smartSplit(docID, text, filename string, chunkSize int) []*domain.DocumentChunk {
 	var chunks []*domain.DocumentChunk
@@ -173,4 +243,49 @@ func (uc *RAGUseCase) smartSplit(docID, text, filename string, chunkSize int) []
 		})
 	}
 	return chunks
+}
+
+// extractEntities 利用 LLM 从用户问题中提取搜索关键词
+func (uc *RAGUseCase) extractEntities(ctx context.Context, query string) ([]string, error) {
+	// 1. 渲染 Prompt
+	tmpl, _ := template.New("query_extract").Parse(PromptQueryEntityExtraction)
+	var buf bytes.Buffer
+	tmpl.Execute(&buf, map[string]string{"Query": query})
+
+	// 2. 调用 LLM
+	// 这里建议用 Temperature = 0，保证结果稳定
+	// 但我们的接口目前没有暴露 Temperature 参数，暂时用默认的
+	history := []domain.Message{
+		{Role: domain.RoleUser, Content: buf.String()},
+	}
+
+	resp, err := uc.llm.Chat(ctx, history)
+	if err != nil {
+		return nil, err
+	}
+
+	// 3. 清洗 & 解析 JSON
+	cleanResp := CleanJSONBlock(resp)
+
+	var keywords []string
+	if err := json.Unmarshal([]byte(cleanResp), &keywords); err != nil {
+		// 如果解析失败，回退策略：直接把原始 query 当作关键词
+		// 或者尝试简单的 split
+		fmt.Printf(" Query extraction JSON error: %v. Raw: %s\n", err, resp)
+		return []string{query}, nil
+	}
+
+	return keywords, nil
+}
+
+func uniqueStrings(input []string) []string {
+	keys := make(map[string]bool)
+	list := []string{}
+	for _, entry := range input {
+		if _, value := keys[entry]; !value {
+			keys[entry] = true
+			list = append(list, entry)
+		}
+	}
+	return list
 }

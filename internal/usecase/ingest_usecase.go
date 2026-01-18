@@ -72,11 +72,11 @@ func (s *IngestService) processJob(workerID int, job *IngestJob) {
 	var content string
 	select {
 	case <-ctx.Done():
-		log.Printf("❌ Worker %d TIMEOUT processing file: %s", workerID, job.FileHeader.Filename)
+		log.Printf("Worker %d TIMEOUT processing file: %s", workerID, job.FileHeader.Filename)
 		return // 放弃任务
 	case res := <-resultChan:
 		if res.err != nil {
-			log.Printf("❌ Worker %d parse error: %v", workerID, res.err)
+			log.Printf(" Worker %d parse error: %v", workerID, res.err)
 			return
 		}
 		content = res.content
@@ -86,6 +86,19 @@ func (s *IngestService) processJob(workerID int, job *IngestJob) {
 	if err != nil {
 		log.Printf("Worker %d storage error: %v", workerID, err)
 		return
+	}
+	fmt.Printf("🕸️ Worker %d: Extracting Knowledge Graph...\n", workerID)
+	// 截取一部分文本防止 LLM 撑爆，或者遍历 AddDocumentText 生成的 chunks
+	graphText := content
+	if len(graphText) > 4000 {
+		graphText = graphText[:4000]
+	}
+	err = s.ragUC.BuildGraphFromText(context.Background(), graphText)
+	if err != nil {
+		log.Printf(" Worker %d graph extraction error: %v", workerID, err)
+		// 图谱提取失败不应该标记为整个任务失败，打个日志就行
+	} else {
+		fmt.Printf(" Worker %d: Knowledge Graph Built!\n", workerID)
 	}
 	fmt.Printf("Worker %d finished file: %s\n", workerID, job.FileHeader.Filename)
 }

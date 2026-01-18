@@ -197,7 +197,7 @@ func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, histor
 	if err != nil {
 		return nil, err
 	}
-	cleanJSON := cleanJSONBlock(resp)
+	cleanJSON := CleanJSONBlock(resp)
 
 	var decision SupervisorDecision
 	if err := json.Unmarshal([]byte(cleanJSON), &decision); err != nil {
@@ -252,7 +252,7 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 	return sb.String(), nil
 }
 
-func cleanJSONBlock(text string) string {
+func CleanJSONBlock(text string) string {
 	text = strings.TrimSpace(text)
 	text = strings.TrimPrefix(text, "```json")
 	text = strings.TrimPrefix(text, "```")

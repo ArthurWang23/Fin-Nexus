@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	v1 "go-nexus/internal/delivery/http/v1"
+	"go-nexus/internal/infrastructure/graph"
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/infrastructure/persistence"
 	"go-nexus/internal/usecase"
@@ -73,7 +74,17 @@ func main() {
 	}
 	llmClient := llm.NewOpenAIAdapter(llmConfig)
 
-	ragService := usecase.NewRAGUseCase(repo, repo, llmClient)
+	// 初始化 Neo4j 图数据库（可选，如果连接失败则设为 nil）
+	neo4jURI := getEnvOrDefault("NEO4J_URI", "bolt://localhost:7687")
+	neo4jUser := getEnvOrDefault("NEO4J_USER", "neo4j")
+	neo4jPassword := getEnvOrDefault("NEO4J_PASSWORD", "nexus_password")
+	graphRepo, err := graph.NewNeo4jRepo(neo4jURI, neo4jUser, neo4jPassword)
+	if err != nil {
+		log.Fatalf("Failed to connect to Neo4j: %v", err)
+	}
+	defer graphRepo.Close(context.Background())
+
+	ragService := usecase.NewRAGUseCase(repo, repo, llmClient, graphRepo)
 	ingestService := usecase.NewIngestService(ragService, 5)
 	agentService := usecase.NewAgentUseCase(llmClient, ragService)
 	chatHandler := v1.NewChatHandler(ragService)

@@ -21,6 +21,7 @@ type RAGUseCase struct {
 	vectorRepo repo.VectorRepository
 	llm        gateway.LLMClient
 	graphRepo  *graph.Neo4jRepo
+	reranker   gateway.RerankClient
 }
 type GraphExtractionResult struct {
 	Entities  []graph.Entity   `json:"entities"`
@@ -32,12 +33,14 @@ func NewRAGUseCase(
 	vecRepo repo.VectorRepository,
 	llm gateway.LLMClient,
 	graphRepo *graph.Neo4jRepo,
+	reranker gateway.RerankClient,
 ) *RAGUseCase {
 	return &RAGUseCase{
 		docRepo:    docRepo,
 		vectorRepo: vecRepo,
 		llm:        llm,
 		graphRepo:  graphRepo,
+		reranker:   reranker,
 	}
 }
 
@@ -58,15 +61,42 @@ func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 // 带有知识检索的对话
 func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, error) {
 	var g errgroup.Group
-	var chunks []*domain.DocumentChunk
+	var finalContexts []string
 	var entities []string
 
 	g.Go(func() error {
+		var chunks []*domain.DocumentChunk
 		vectors, err := uc.llm.Embed(ctx, []string{query})
 		if err != nil {
-			return err
+			return fmt.Errorf("llm embed error: %w", err)
 		}
-		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 3)
+		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5)
+		if err != nil {
+			return fmt.Errorf("vector search error: %w", err)
+		}
+		var candidates []string
+		for _, chunk := range chunks {
+			candidates = append(candidates, chunk.Content)
+		}
+		fmt.Printf(" Reranking %d documents using Jina...\n", len(chunks))
+		rankedResults, err := uc.reranker.Rerank(ctx, query, candidates, 2)
+		if err != nil {
+			fmt.Printf("Jina Rerank failed: %v, fallback to vector sort\n", err)
+			// 降级：直接取向量前5
+			for i, t := range candidates {
+				if i >= 5 {
+					break
+				}
+				finalContexts = append(finalContexts, t)
+			}
+		} else {
+			for _, res := range rankedResults {
+				fmt.Printf("   [Score: %.4f] %s...\n", res.Score, res.Document[:20])
+				if res.Score > 0.2 {
+					finalContexts = append(finalContexts, res.Document)
+				}
+			}
+		}
 		return err
 	})
 
@@ -93,8 +123,8 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, 
 
 	var contextBuilder strings.Builder
 	contextBuilder.WriteString("【文档片段】:\n")
-	for _, c := range chunks {
-		contextBuilder.WriteString(c.Content + "\n---\n")
+	for _, c := range finalContexts {
+		contextBuilder.WriteString(c + "\n---\n")
 	}
 	if len(graphContext) > 0 {
 		contextBuilder.WriteString("\n【知识图谱信息】:\n")
@@ -108,7 +138,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, 
 			contextBuilder.WriteString("- " + k + "\n")
 		}
 	}
-	fmt.Printf(" Final Context: Graph Nodes=%d, Vector Chunks=%d\n", len(graphContext), len(chunks))
+	fmt.Printf(" Final Context: Graph Nodes=%d, Vector Chunks=%d\n", len(graphContext), len(finalContexts))
 	systemPrompt := fmt.Sprintf(`你是一个智能助手。请结合以下资料回答问题。
 优先基于【知识图谱信息】理清实体间的关系，再结合【文档片段】补充细节。
 

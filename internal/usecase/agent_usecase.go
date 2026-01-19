@@ -8,11 +8,9 @@ import (
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/tools"
+	"go.opentelemetry.io/otel"
 	"strings"
 	"text/template"
-	"time"
-
-	"go.opentelemetry.io/otel"
 )
 
 const (
@@ -208,10 +206,12 @@ func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, histor
 }
 
 func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string) (string, error) {
-	fmt.Printf("Researcher is searching: %s\n", instruction)
-	time.Sleep(30 * time.Second)
-
-	return uc.ragUC.SearchOnly(ctx, instruction) // 只检索不Chat
+	fmt.Printf(" Researcher is searching and summarizing: %s\n", instruction)
+	answer, err := uc.ragUC.SearchAndChat(ctx, instruction)
+	if err != nil {
+		return "", fmt.Errorf("researcher failed: %w", err)
+	}
+	return fmt.Sprintf("【研究员报告】:\n%s", answer), nil
 }
 
 func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (string, error) {

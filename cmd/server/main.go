@@ -87,7 +87,9 @@ func main() {
 	}
 	defer graphRepo.Close(context.Background())
 
-	ragService := usecase.NewRAGUseCase(repo, repo, llmClient, graphRepo)
+	jinaKey := os.Getenv("JINA_API_KEY")
+	reranker := llm.NewJinaReranker(jinaKey)
+	ragService := usecase.NewRAGUseCase(repo, repo, llmClient, graphRepo, reranker)
 	ingestService := usecase.NewIngestService(ragService, 5)
 	agentService := usecase.NewAgentUseCase(llmClient, ragService)
 	chatHandler := v1.NewChatHandler(ragService)

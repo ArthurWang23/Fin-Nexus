@@ -142,6 +142,7 @@ func main() {
 		api.POST("/agent-approve", agentHandler.Approve)
 		api.GET("/ws/chat", wsHandler.HandleWS)
 	}
+	r.Static("/images", "./public/images")
 
 	// 服务器端口（优先使用环境变量）
 	port := getEnvOrDefault("SERVER_PORT", viper.GetString("server.port"))

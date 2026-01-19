@@ -23,7 +23,10 @@ func RunPythonCode(code string) string {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	output, err := executor.RunPython(ctx, code)
+	output, files, err := executor.RunPython(ctx, code)
+	if len(files) > 0 {
+		output += fmt.Sprintf("\n[SYSTEM]: Generated images: %v", files)
+	}
 	if err != nil {
 		errMsg := fmt.Sprintf("Execution Failed: %v", err)
 		fmt.Printf("Docker Error: %s\n", errMsg)

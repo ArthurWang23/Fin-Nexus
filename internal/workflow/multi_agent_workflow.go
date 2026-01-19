@@ -92,7 +92,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 	ctx = workflow.WithActivityOptions(ctx, ao)
 	history := []domain.Message{}
 	// 最大循环次数，防止 Agent 陷入死循环
-	maxSteps := 10
+	maxSteps := 20
 	for i := 0; i < maxSteps; i++ {
 		var decision usecase.SupervisorDecision
 		input := activities.SupervisorInput{

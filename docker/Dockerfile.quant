@@ -1,0 +1,32 @@
+# 使用轻量级 Python 基础镜像
+FROM python:3.10-slim
+
+# 设置工作目录
+WORKDIR /app
+
+# 设置环境变量，防止 Python 生成 .pyc 文件，且让 matplotlib 不弹窗
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV MPLBACKEND=Agg
+
+# 1. 安装系统依赖 (有些数学库需要编译环境)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    g++ \
+    libfreetype6-dev \
+    libpng-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# 2. 安装 Python 金融全家桶
+# 这是一个耗时操作，放在这里构建，运行时就不用下载了
+RUN pip install --no-cache-dir \
+    numpy \
+    pandas \
+    matplotlib \
+    mplfinance \
+    yfinance \
+    scikit-learn \
+    scipy
+
+# 默认命令（实际会被 Go 的 Cmd 覆盖）
+CMD ["python3"]

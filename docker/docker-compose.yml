@@ -1,0 +1,113 @@
+services:
+  # 1. 我们的 Go 应用
+  app:
+    build: .
+    container_name: go_nexus_app
+    ports:
+      - "8080:8080"
+    environment:
+      - JAEGER_ENDPOINT=jaeger:4318 # 指向 Jaeger 服务
+      - DB_HOST=postgres
+      - DB_USER=nexus
+      - DB_PASSWORD=nexus_password
+      - DB_NAME=nexus_db
+      - DB_PORT=5432
+      - LLM_API_KEY=sk-9073aeb278f44406bf6c8d0f24bd803e
+      - LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+      - LLM_MODEL=qwen3-max
+      - LLM_EMBEDDING_MODEL=text-embedding-v4
+      - SERVER_PORT=8080
+      - DOCKER_API_VERSION=1.41
+      - TEMPORAL_HOST=temporal:7233
+      - REDIS_HOST=redis:6379
+      - NEO4J_PASSWORD=nexus_password
+      - NEO4J_USER=neo4j
+      - NEO4J_URI=bolt://neo4j:7687
+      - JINA_API_KEY=jina_ac920b7e936841ac8767a686f2044d90LgFgN7JAhnFmpiHuLYX5XZIZJpkd
+    depends_on:
+      postgres:
+        condition: service_started
+      temporal:
+        condition: service_started
+      jaeger:
+        condition: service_started
+      neo4j:
+        condition: service_healthy
+      redis:
+        condition: service_started
+    networks:
+      - nexus_net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # 2. 数据库 (保持不变)
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: go_nexus_db
+    environment:
+      POSTGRES_USER: nexus
+      POSTGRES_PASSWORD: nexus_password
+      POSTGRES_DB: nexus_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - nexus_net
+
+  # 3. Jaeger (链路追踪 UI + Collector)
+  jaeger:
+    image: jaegertracing/all-in-one:latest
+    container_name: go_nexus_jaeger
+    ports:
+      - "16686:16686" # UI 端口
+      - "4318:4318"   # OTLP HTTP 接收端口
+    networks:
+      - nexus_net
+
+  temporal:
+    image: temporalio/admin-tools:latest
+    container_name: temporal
+    ports:
+      - "7233:7233" # grpc 端口
+      - "8088:8088" # Web UI 端口
+    environment:
+      - TEMPORAL_CLI_ADDRESS=localhost:7233
+    entrypoint: ["/bin/bash","-c", "temporal server start-dev --ip 0.0.0.0 --ui-port 8088"]
+    networks:
+      - nexus_net
+
+  neo4j:
+    image: neo4j:5.15-community
+    container_name: go_nexus_graph
+    ports:
+      - "7474:7474" # HTTP UI
+      - "7687:7687" # Bolt 协议 (Go 连接用)
+    environment:
+      - NEO4J_AUTH=neo4j/nexus_password
+    volumes:
+      - neo4j_data:/data
+    networks:
+      - nexus_net
+    healthcheck:
+      # 每 5 秒检查一次 HTTP 端口是否通
+      test: [ "CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:7474 || exit 1" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s # 10秒 预热时间
+
+  redis:
+    image: redis:alpine
+    container_name: go_nexus_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - nexus_net
+
+networks:
+  nexus_net:
+
+volumes:
+  pg_data:
+  neo4j_data:

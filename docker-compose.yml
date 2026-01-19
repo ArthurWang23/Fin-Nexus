@@ -19,6 +19,7 @@ services:
       - SERVER_PORT=8080
       - DOCKER_API_VERSION=1.41
       - TEMPORAL_HOST=temporal:7233
+      - REDIS_HOST=redis:6379
       - NEO4J_PASSWORD=nexus_password
       - NEO4J_USER=neo4j
       - NEO4J_URI=bolt://neo4j:7687
@@ -31,6 +32,8 @@ services:
         condition: service_started
       neo4j:
         condition: service_healthy
+      redis:
+        condition: service_started
     networks:
       - nexus_net
     volumes:
@@ -92,6 +95,14 @@ services:
       timeout: 3s
       retries: 10
       start_period: 10s # 10秒 预热时间
+
+  redis:
+    image: redis:alpine
+    container_name: go_nexus_redis
+    ports:
+      - "6379:6379"
+    networks:
+      - nexus_net
 
 networks:
   nexus_net:

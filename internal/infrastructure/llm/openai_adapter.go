@@ -3,10 +3,13 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/sashabaranov/go-openai"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
+	"io"
+	"strings"
 )
 
 type OpenAIAdapter struct {
@@ -144,4 +147,44 @@ func (a *OpenAIAdapter) ChatWithTools(ctx context.Context, history []domain.Mess
 		}
 	}
 	return result, nil
+}
+
+// 流式对话
+func (a *OpenAIAdapter) StreamChat(ctx context.Context, history []domain.Message, onToken func(string)) (string, error) {
+	var messages []openai.ChatCompletionMessage
+	for _, msg := range history {
+		role := string(msg.Role)
+		messages = append(messages, openai.ChatCompletionMessage{
+			Role:    role,
+			Content: msg.Content,
+		})
+	}
+	req := openai.ChatCompletionRequest{
+		Model:    a.config.Model,
+		Messages: messages,
+		Stream:   true,
+	}
+	stream, err := a.client.CreateChatCompletionStream(ctx, req)
+	if err != nil {
+		return "", err
+	}
+	defer stream.Close()
+
+	var fullResponse strings.Builder
+	for {
+		resp, err := stream.Recv()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+
+		token := resp.Choices[0].Delta.Content
+		if token != "" {
+			fullResponse.WriteString(token)
+			onToken(token)
+		}
+	}
+	return fullResponse.String(), nil
 }

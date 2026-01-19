@@ -35,4 +35,6 @@ type LLMClient interface {
 	Embed(ctx context.Context, texts []string) ([][]float32, error)
 
 	ChatWithTools(ctx context.Context, history []domain.Message, tools []ToolDefinition) (*LLMResponse, error)
+
+	StreamChat(ctx context.Context, history []domain.Message, onToken func(string)) (string, error)
 }

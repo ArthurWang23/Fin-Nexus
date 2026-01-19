@@ -1,12 +1,14 @@
 package workflow
 
 import (
+	"fmt"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase"
 	"go-nexus/internal/workflow/activities"
+	"time"
+
 	"go.temporal.io/sdk/temporal"
 	"go.temporal.io/sdk/workflow"
-	"time"
 )
 
 const SignalApprove = "APPROVE_SIGNAL"
@@ -77,4 +79,51 @@ func MultiAgentWorkflow(ctx workflow.Context, userQuery string) (string, error) 
 		})
 	}
 	return "任务超时，步骤过多", nil
+}
+
+func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID string) (string, error) {
+	ao := workflow.ActivityOptions{
+		StartToCloseTimeout: time.Minute * 5, // 单个步骤最大超时
+		RetryPolicy: &temporal.RetryPolicy{
+			InitialInterval: time.Second,
+			MaximumAttempts: 3,
+		},
+	}
+	ctx = workflow.WithActivityOptions(ctx, ao)
+	history := []domain.Message{}
+	// 最大循环次数，防止 Agent 陷入死循环
+	maxSteps := 10
+	for i := 0; i < maxSteps; i++ {
+		var decision usecase.SupervisorDecision
+		input := activities.SupervisorInput{
+			Query:   userQuery,
+			History: history,
+		}
+		err := workflow.ExecuteActivity(ctx, "SupervisorDecideStream", input, streamID).Get(ctx, &decision)
+		if err != nil {
+			return "", err
+		}
+		if decision.NextAgent == "FINISH" {
+			var finalAnswer string
+			finalHistory := append(history, domain.Message{
+				Role:    domain.RoleSystem,
+				Content: fmt.Sprintf("任务已完成。主管的总结思路是: %s。请据此给用户一个完整、友好的最终回复。", decision.FinalAnswer),
+			})
+
+			err := workflow.ExecuteActivity(ctx, "FinalReplyStream", finalHistory, streamID).Get(ctx, &finalAnswer)
+			return finalAnswer, err
+		}
+		var workerResult string
+		err = workflow.ExecuteActivity(ctx, "WorkerRunStream", decision.NextAgent, decision.Instruction, streamID).Get(ctx, &workerResult)
+		if err != nil {
+			// 如果 Worker 报错，不让 Workflow 失败，而是把错误信息放回 History 让 Supervisor 重试
+			workerResult = fmt.Sprintf("Error executing task: %v", err)
+		}
+		history = append(history, domain.Message{
+			Role:    domain.RoleUser, // 使用 User 角色模拟“外界反馈”
+			Content: fmt.Sprintf("【%s 汇报】:\n%s", decision.NextAgent, workerResult),
+		})
+	}
+
+	return "任务执行步骤过多，已被系统强制终止。", nil
 }

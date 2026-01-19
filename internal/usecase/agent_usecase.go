@@ -252,6 +252,10 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 	return sb.String(), nil
 }
 
+func (uc *AgentUseCase) StreamChat(ctx context.Context, history []domain.Message, onToken func(string)) (string, error) {
+	return uc.llm.StreamChat(ctx, history, onToken)
+}
+
 func CleanJSONBlock(text string) string {
 	text = strings.TrimSpace(text)
 	text = strings.TrimPrefix(text, "```json")

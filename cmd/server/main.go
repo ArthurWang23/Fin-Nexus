@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"go-nexus/internal/delivery/http"
 	v1 "go-nexus/internal/delivery/http/v1"
 	"go-nexus/internal/infrastructure/graph"
 	"go-nexus/internal/infrastructure/llm"
@@ -13,10 +14,12 @@ import (
 	"go-nexus/internal/workflow/activities"
 	"go-nexus/pkg/database"
 	"go-nexus/pkg/telemetry"
-	"go.temporal.io/sdk/client"
-	"go.temporal.io/sdk/worker"
 	"log"
 	"os"
+
+	"github.com/redis/go-redis/v9"
+	"go.temporal.io/sdk/client"
+	"go.temporal.io/sdk/worker"
 
 	"github.com/gin-gonic/gin"
 	"github.com/spf13/viper"
@@ -104,11 +107,18 @@ func main() {
 	defer tClient.Close()
 	w := worker.New(tClient, "agent-task-queue", worker.Options{})
 
-	agentActivities := activities.NewAgentActivities(agentService)
+	redisAddr := getEnvOrDefault("REDIS_HOST", "localhost:6379")
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	agentActivities := activities.NewAgentActivities(agentService, rdb)
+	wsHandler := http.NewWSHandler(rdb, tClient)
 	w.RegisterWorkflow(workflow.MultiAgentWorkflow)
 	w.RegisterActivity(agentActivities.SupervisorDecide)
 	w.RegisterActivity(agentActivities.ResearcherSearch)
 	w.RegisterActivity(agentActivities.CoderRun)
+	w.RegisterWorkflow(workflow.StreamMultiAgentWorkflow)
+	w.RegisterActivity(agentActivities.SupervisorDecideStream)
+	w.RegisterActivity(agentActivities.WorkerRunStream)
+	w.RegisterActivity(agentActivities.FinalReplyStream)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)
@@ -128,6 +138,7 @@ func main() {
 		api.POST("/multi-agent", agentHandler.MultiChat)
 		api.POST("/async-chat", agentHandler.AsyncChat)
 		api.POST("/agent-approve", agentHandler.Approve)
+		api.GET("/ws/chat", wsHandler.HandleWS)
 	}
 
 	// 服务器端口（优先使用环境变量）

@@ -32,11 +32,18 @@ func NewDockerExecutor() (*DockerExecutor, error) {
 
 // RunPython 执行 Python 代码并返回 Stdout/Stderr
 func (e *DockerExecutor) RunPython(ctx context.Context, code string) (string, []string, error) {
-	// 1. 准备配置
-	// 为了安全，我们禁用网络，限制内存
+	// 防止模型忘了 print出文件名
+	monitorCode := `
+import os
+import glob
+# 查找当前目录下所有的 png 文件
+for filename in glob.glob("*.png"):
+    print(f"__AUTO_DETECTED_FILE__:{filename}")
+`
+	finalCode := code + "\n" + monitorCode
 	config := &container.Config{
 		Image:           "go-nexus-quant:latest",
-		Cmd:             []string{"python", "-u", "-c", code}, // 直接在命令行执行
+		Cmd:             []string{"python", "-u", "-c", finalCode}, // 直接在命令行执行
 		Tty:             false,
 		NetworkDisabled: false, // 关键安全设置：禁止联网，防止恶意代码
 	}
@@ -107,26 +114,26 @@ func (e *DockerExecutor) RunPython(ctx context.Context, code string) (string, []
 	if err := os.MkdirAll(outputDir, 0755); err != nil {
 		return result, nil, fmt.Errorf("failed to create local image dir: %w", err)
 	}
-
+	// 去重 防止打印了两次
+	foundFiles := make(map[string]bool)
 	lines := strings.Split(stdoutBuf.String(), "\n")
 
 	for _, line := range lines {
-		cleanLine := strings.TrimSpace(line)
-		if strings.HasPrefix(cleanLine, "__FILE__:") {
-			filename := strings.TrimSpace(strings.TrimPrefix(cleanLine, "__FILE__:"))
-			// 注意：有时候 LLM 可能会加引号，如 "__FILE__:'chart.png'"，再清理一次
-			filename = strings.Trim(filename, "'\"")
-
-			if filename != "" {
-				fmt.Printf(" Detected file generation: %s, extracting...\n", filename)
-
+		line = strings.TrimSpace(line)
+		var filename string
+		if strings.HasPrefix(line, "__AUTO_DETECTED_FILE__:") {
+			filename = strings.TrimPrefix(line, "__AUTO_DETECTED_FILE__:")
+		} else if strings.HasPrefix(line, "__FILE__:") {
+			filename = strings.TrimPrefix(line, "__FILE__:")
+		}
+		if filename != "" {
+			filename = strings.Trim(filename, "'\"") // 去除引号
+			if _, exists := foundFiles[filename]; !exists {
+				foundFiles[filename] = true
+				fmt.Printf(" Detected file: %s, extracting...\n", filename)
 				localPath, err := e.copyFileFromContainer(ctx, containerID, filename, outputDir)
 				if err == nil {
 					generatedFiles = append(generatedFiles, localPath)
-					fmt.Printf(" Extracted to: %s\n", localPath)
-				} else {
-					fmt.Printf(" Extraction failed: %v\n", err)
-					result += fmt.Sprintf("\n[SYSTEM ERROR]: Failed to extract file %s: %v", filename, err)
 				}
 			}
 		}

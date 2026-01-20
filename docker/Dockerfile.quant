@@ -28,5 +28,9 @@ RUN pip install --no-cache-dir \
     scikit-learn \
     scipy
 
+RUN pip install --no-cache-dir \
+    GoogleNews \
+    textblob  # 简单的情感分析库
+
 # 默认命令（实际会被 Go 的 Cmd 覆盖）
 CMD ["python3"]

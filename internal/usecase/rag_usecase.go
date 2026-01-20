@@ -9,9 +9,10 @@ import (
 	"go-nexus/internal/infrastructure/graph"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
-	"golang.org/x/sync/errgroup"
 	"strings"
 	"text/template"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/google/uuid"
 )
@@ -59,7 +60,7 @@ func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 }
 
 // 带有知识检索的对话
-func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, error) {
+func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, systemPrompt ...string) (string, error) {
 	var g errgroup.Group
 	var finalContexts []string
 	var entities []string
@@ -139,14 +140,23 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string) (string, 
 		}
 	}
 	fmt.Printf(" Final Context: Graph Nodes=%d, Vector Chunks=%d\n", len(graphContext), len(finalContexts))
-	systemPrompt := fmt.Sprintf(`你是一个智能助手。请结合以下资料回答问题。
+	var finalSystemPrompt string
+	if len(systemPrompt) > 0 && systemPrompt[0] != "" {
+		finalSystemPrompt = fmt.Sprintf(`%s
+请结合以下资料回答问题：
+优先基于【知识图谱信息】理清实体间的关系，再结合【文档片段】补充细节。
+参考资料:
+%s`, systemPrompt[0], contextBuilder.String())
+	} else {
+		finalSystemPrompt = fmt.Sprintf(`你是一个智能助手。请结合以下资料回答问题。
 优先基于【知识图谱信息】理清实体间的关系，再结合【文档片段】补充细节。
 
 参考资料:
 %s`, contextBuilder.String())
+	}
 
 	history := []domain.Message{
-		{Role: domain.RoleSystem, Content: systemPrompt},
+		{Role: domain.RoleSystem, Content: finalSystemPrompt},
 		{Role: domain.RoleUser, Content: query},
 	}
 	return uc.llm.Chat(ctx, history)

@@ -112,7 +112,14 @@ func main() {
 	redisAddr := getEnvOrDefault("REDIS_HOST", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	agentActivities := activities.NewAgentActivities(agentService, rdb)
+	dataActivities := activities.NewDataActivities(agentService)
 	wsHandler := http.NewWSHandler(rdb, tClient)
+
+	// 初始化 Python 工具（必须在 worker 启动前完成）
+	if err := tools.InitPythonTool(); err != nil {
+		log.Fatalf("Failed to init python tool (is Docker running?): %v", err)
+	}
+
 	w.RegisterWorkflow(workflow.MultiAgentWorkflow)
 	w.RegisterActivity(agentActivities.SupervisorDecide)
 	w.RegisterActivity(agentActivities.ResearcherSearch)
@@ -121,15 +128,14 @@ func main() {
 	w.RegisterActivity(agentActivities.SupervisorDecideStream)
 	w.RegisterActivity(agentActivities.WorkerRunStream)
 	w.RegisterActivity(agentActivities.FinalReplyStream)
+	w.RegisterActivity(dataActivities.FetchAndIngest)
+	w.RegisterWorkflow(workflow.ScheduledDataIngestion)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)
 		}
 	}()
 	agentHandler := v1.NewAgentHandler(agentService, tClient)
-	if err := tools.InitPythonTool(); err != nil {
-		log.Fatalf("Failed to init python tool (is Docker running?): %v", err)
-	}
 	r := gin.Default()
 	api := r.Group("/api/v1")
 	{

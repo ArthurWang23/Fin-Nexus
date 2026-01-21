@@ -15,9 +15,9 @@ func InitPythonTool() error {
 	return err
 }
 
-func RunPythonCode(code string) string {
+func RunPythonCode(code string) (string, []string) {
 	if executor == nil {
-		return "Error: Python executor not initialized."
+		return "Error: Python executor not initialized.", nil
 	}
 	fmt.Printf("Running Python Code:\n%s\n", code)
 
@@ -30,9 +30,9 @@ func RunPythonCode(code string) string {
 	if err != nil {
 		errMsg := fmt.Sprintf("Execution Failed: %v", err)
 		fmt.Printf("Docker Error: %s\n", errMsg)
-		return errMsg
+		return errMsg, nil
 	}
-	return output
+	return output, files
 }
 
 func GetPythonToolSchema() string {

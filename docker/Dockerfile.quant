@@ -24,9 +24,11 @@ RUN pip install --no-cache-dir \
     pandas \
     matplotlib \
     mplfinance \
-    yfinance \
     scikit-learn \
-    scipy
+    scipy \
+    curl-cffi \
+    yahooquery \
+    --upgrade yfinance
 
 RUN pip install --no-cache-dir \
     GoogleNews \

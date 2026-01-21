@@ -36,8 +36,10 @@ func (e *DockerExecutor) RunPython(ctx context.Context, code string) (string, []
 	monitorCode := `
 import os
 import glob
-# 查找当前目录下所有的 png 文件
+# 查找当前目录下所有的 png 和 txt 文件
 for filename in glob.glob("*.png"):
+    print(f"__AUTO_DETECTED_FILE__:{filename}")
+for filename in glob.glob("*.txt"):
     print(f"__AUTO_DETECTED_FILE__:{filename}")
 `
 	finalCode := code + "\n" + monitorCode
@@ -109,11 +111,6 @@ for filename in glob.glob("*.png"):
 
 	var generatedFiles []string
 
-	// 定义宿主机存储路径 (确保这个目录存在，或者由代码创建)
-	outputDir := "./public/images"
-	if err := os.MkdirAll(outputDir, 0755); err != nil {
-		return result, nil, fmt.Errorf("failed to create local image dir: %w", err)
-	}
 	// 去重 防止打印了两次
 	foundFiles := make(map[string]bool)
 	lines := strings.Split(stdoutBuf.String(), "\n")
@@ -131,9 +128,31 @@ for filename in glob.glob("*.png"):
 			if _, exists := foundFiles[filename]; !exists {
 				foundFiles[filename] = true
 				fmt.Printf(" Detected file: %s, extracting...\n", filename)
-				localPath, err := e.copyFileFromContainer(ctx, containerID, filename, outputDir)
+
+				// 根据文件扩展名选择输出目录
+				var outputDir string
+				var urlPrefix string
+				if strings.HasSuffix(strings.ToLower(filename), ".png") ||
+					strings.HasSuffix(strings.ToLower(filename), ".jpg") ||
+					strings.HasSuffix(strings.ToLower(filename), ".jpeg") {
+					outputDir = "./public/images"
+					urlPrefix = "/images"
+				} else {
+					// 文本文件和其他文件保存到 public 目录
+					outputDir = "./public"
+					urlPrefix = ""
+				}
+
+				if err := os.MkdirAll(outputDir, 0755); err != nil {
+					fmt.Printf("Warning: failed to create output dir %s: %v\n", outputDir, err)
+					continue
+				}
+
+				localPath, err := e.copyFileFromContainer(ctx, containerID, filename, outputDir, urlPrefix)
 				if err == nil {
 					generatedFiles = append(generatedFiles, localPath)
+				} else {
+					fmt.Printf("Warning: failed to copy file %s: %v\n", filename, err)
 				}
 			}
 		}
@@ -143,7 +162,7 @@ for filename in glob.glob("*.png"):
 }
 
 // copyFileFromContainer 从容器复制文件到宿主机
-func (e *DockerExecutor) copyFileFromContainer(ctx context.Context, containerID, srcFile, destDir string) (string, error) {
+func (e *DockerExecutor) copyFileFromContainer(ctx context.Context, containerID, srcFile, destDir, urlPrefix string) (string, error) {
 	srcPath := "/app/" + srcFile
 
 	reader, _, err := e.cli.CopyFromContainer(ctx, containerID, srcPath)
@@ -178,7 +197,12 @@ func (e *DockerExecutor) copyFileFromContainer(ctx context.Context, containerID,
 				return "", err
 			}
 			outFile.Close()
-			return "/images/" + localFilename, nil
+
+			// 根据 urlPrefix 返回正确的路径
+			if urlPrefix != "" {
+				return urlPrefix + "/" + localFilename, nil
+			}
+			return "/" + localFilename, nil
 		}
 	}
 

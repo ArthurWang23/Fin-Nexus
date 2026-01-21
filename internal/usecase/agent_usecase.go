@@ -100,7 +100,7 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 			}
 
 			// 执行 Docker 沙箱
-			toolResult := tools.RunPythonCode(args.Code)
+			toolResult, _ := tools.RunPythonCode(args.Code)
 			fmt.Printf("Agent: Docker Output: [%s]\n", toolResult)
 			spanTool.End()
 			toolFeedback := fmt.Sprintf("【代码执行结果】:\n%s", toolResult)
@@ -219,7 +219,7 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 			_ = json.Unmarshal([]byte(call.Args), &args)
 
 			// 真正执行
-			output := tools.RunPythonCode(args.Code)
+			output, _ := tools.RunPythonCode(args.Code)
 			sb.WriteString(fmt.Sprintf("Code:\n%s\nOutput:\n%s\n", args.Code, output))
 		}
 	}
@@ -228,6 +228,21 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 
 func (uc *AgentUseCase) StreamChat(ctx context.Context, history []domain.Message, onToken func(string)) (string, error) {
 	return uc.llm.StreamChat(ctx, history, onToken)
+}
+
+func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename string) error {
+	if err := uc.ragUC.AddDocumentText(ctx, text, filename); err != nil {
+		return err
+	}
+	graphText := text
+	if len(graphText) > 4000 {
+		graphText = graphText[:4000]
+	}
+
+	if err := uc.ragUC.BuildGraphFromText(ctx, graphText); err != nil {
+		fmt.Printf("Graph extraction warning: %v\n", err)
+	}
+	return nil
 }
 
 func CleanJSONBlock(text string) string {

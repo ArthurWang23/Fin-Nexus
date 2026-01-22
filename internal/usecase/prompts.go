@@ -1,36 +1,31 @@
 package usecase
 
 const PromptExtractGraph = `
-你是一个金融数据结构化专家。请阅读以下研报/新闻文本，提取其中的金融实体和商业关系。
+你是一个金融情报分析师。请阅读以下文本，构建企业关联图谱。
 
 【提取目标】：
+请尽可能多地提取实体和关系，不要局限于供应链。我们希望捕捉商业世界的动态网络。
+
 1. 实体类型 (Type):
-   - "Company" (公司，如 Nvidia, TSMC)
-   - "Person" (高管，如 Jensen Huang)
-   - "Product" (产品，如 H100 GPU)
-   - "Sector" (行业，如 Semiconductor)
+   - "Company" (如 Nvidia, TSMC)
+   - "Person" (如 Jensen Huang)
+   - "Product" (如 H100, Blackwell)
+   - "Sector" (如 AI, Semiconductor)
+   - "Event" (关键事件，如 "Earnings Call", "Product Launch", "Lawsuit")
+   - "Topic" (概念，如 "Generative AI", "Supply Chain Shortage")
 
-2. 关系类型 (Type) - 全部大写:
-   - "SUPPLIER_OF" (是...的供应商)
-   - "CUSTOMER_OF" (是...的客户)
-   - "COMPETES_WITH" (竞争对手)
-   - "CEO_OF" (是...的CEO)
-   - "LAUNCHED" (发布了产品)
-【严禁提取】：
-1. 不要提取具体的**数字、金额、百分比**作为实体（如 "$100", "5%"）。
-2. 不要提取**时间、日期**作为实体（如 "Today", "2024"）。
-3. 不要提取**即时股价变动**作为关系。我们只关注长期的商业关系与基本面信息。
+2. 关系类型 (Type) - 请使用大写动词短语，尽可能丰富:
+   - "SUPPLIER_OF" / "CUSTOMER_OF" (供应链)
+   - "COMPETES_WITH" / "PARTNER_WITH" (商业关系)
+   - "LAUNCHED" / "ANNOUNCED" (发布)
+   - "AFFECTED_BY" (受...影响)
+   - "DISCUSSED" (讨论了...)
+   - "RELATED_TO" (弱相关)
 
-【输出示例】：
-{
-    "entities": [
-        {"name": "Nvidia", "type": "Company"},
-        {"name": "TSMC", "type": "Company"}
-    ],
-    "relations": [
-        {"source": {"name": "TSMC", "type": "Company"}, "target": {"name": "Nvidia", "type": "Company"}, "type": "SUPPLIER_OF"}
-    ]
-}
+【规则】：
+1. 忽略具体的数字（如 "$100"）、百分比。
+2. 忽略相对时间（如 "Today"）。
+3. 如果两个公司在同一条新闻中出现且有互动，请务必建立关系。
 
 【文本内容】：
 {{.Text}}
@@ -132,3 +127,24 @@ JSON 示例:
    - 使用 from textblob import TextBlob 计算新闻标题的情感得分。
 `
 )
+
+const PromptGenerateBrief = `
+你是一位专业的《每日财经早报》主编。你的任务是根据原始数据采集员提供的素材，写一份面向投资者的深度简报。
+
+【当前日期】：{{.Date}} (所有相对时间如"5分钟前"、"刚刚"，请转换为具体语境或忽略，只保留事实)
+【目标股票】：{{.Ticker}}
+
+【原始素材】：
+{{.RawData}}
+
+【写作要求】：
+1. **标题**：使用 Emoji，例如 "🚀 NVDA Daily Brief: 股价再创新高"。
+2. **结构**：
+   - 📉 **行情速递**：不要只列数字，要点评（如“放量上涨”、“缩量回调”）。
+   - 📰 **核心动态**：总结新闻，**着眼于变化**（比如“新产品发布”、“分析师上调评级”）。不要罗列流水账。
+   - 💡 **投资启示**：基于素材给出简短的风险或机会提示。
+3. **风格**：专业、简洁、客观。
+4. **格式**：Markdown。
+
+请直接输出 Markdown 内容。
+`

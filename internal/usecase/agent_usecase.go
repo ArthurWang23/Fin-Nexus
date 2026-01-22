@@ -10,6 +10,7 @@ import (
 	"go-nexus/internal/usecase/tools"
 	"strings"
 	"text/template"
+	"time"
 
 	"go.opentelemetry.io/otel"
 )
@@ -246,6 +247,25 @@ func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename stri
 		}
 	}
 	return nil
+}
+
+func (uc *AgentUseCase) GenerateMorningBrief(ctx context.Context, ticker, rawData string) (string, error) {
+	tmpl, _ := template.New("brief").Parse(PromptGenerateBrief)
+	var buf bytes.Buffer
+
+	// 注入当前日期，解决“5分钟前”的问题
+	today := time.Now().Format("2006-01-02")
+
+	tmpl.Execute(&buf, map[string]string{
+		"Date":    today,
+		"Ticker":  ticker,
+		"RawData": rawData,
+	})
+	history := []domain.Message{
+		{Role: domain.RoleSystem, Content: "你是一个金融主编。"},
+		{Role: domain.RoleUser, Content: buf.String()},
+	}
+	return uc.llm.Chat(ctx, history)
 }
 
 func CleanJSONBlock(text string) string {

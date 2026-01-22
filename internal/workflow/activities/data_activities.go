@@ -13,6 +13,8 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/google/uuid"
 )
 
@@ -62,6 +64,12 @@ func (a *DataActivities) FetchAndIngest(ctx context.Context, ticker string) (str
 		return "", fmt.Errorf("failed to ingest knowledge: %w", err)
 	}
 
+	// 生成简报 final_summary
+	finalReport, err := a.agentUC.GenerateMorningBrief(ctx, ticker, content)
+	if err != nil {
+		fmt.Printf("Report generation failed: %v\n", err)
+		finalReport = "自动生成简报失败，以下是原始数据:\n" + content
+	}
 	// 解析 Meta 数据
 	meta := parseMetaFromLogs(output)
 	if meta.Date == "" {
@@ -73,6 +81,7 @@ func (a *DataActivities) FetchAndIngest(ctx context.Context, ticker string) (str
 		Ticker:         ticker,
 		Date:           meta.Date,
 		RawDataSummary: content,
+		FinalReport:    finalReport,
 		PriceChange:    meta.PriceChange,
 		CreatedAt:      time.Now(),
 	}
@@ -81,8 +90,8 @@ func (a *DataActivities) FetchAndIngest(ctx context.Context, ticker string) (str
 	}
 
 	// 存入redis 快报
-	redisKey := fmt.Sprintf("brief:raw:%s:latest", ticker)
-	a.rdb.Set(ctx, redisKey, content, 24*time.Hour)
+	redisKey := fmt.Sprintf("brief:report:%s:latest", ticker)
+	a.rdb.Set(ctx, redisKey, finalReport, 24*time.Hour)
 	fmt.Printf("[FetchAndIngest] Successfully ingested %s\n", ticker)
 	return fmt.Sprintf("Ingested %s (Chg: %.2f%%)", ticker, meta.PriceChange), nil
 }

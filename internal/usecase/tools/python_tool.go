@@ -21,7 +21,7 @@ func RunPythonCode(code string) (string, []string) {
 	}
 	fmt.Printf("Running Python Code:\n%s\n", code)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	output, files, err := executor.RunPython(ctx, code)
 	if len(files) > 0 {

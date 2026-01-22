@@ -1,72 +1,95 @@
 package tools
 
-// ScriptFetchFundamentals Python 脚本模板
-// 升级版：使用 yahooquery 替代 yfinance 获取简介，大幅提升成功率
-const ScriptFetchFundamentals = `
+const ScriptFetchDailyData = `
 import json
+import datetime
 import sys
 from yahooquery import Ticker
 import yfinance as yf
+from GoogleNews import GoogleNews
 
 ticker_symbol = "{{.Ticker}}"
-print(f"Fetching data for {ticker_symbol} using yahooquery...")
+print(f"--- Fetching Data for {ticker_symbol} ---")
 
-# 初始化 YahooQuery Ticker
-yq_ticker = Ticker(ticker_symbol)
-
-# 1. 获取 Asset Profile (公司简介、行业)
-# yahooquery 会返回一个字典: {'NVDA': {'longBusinessSummary': '...', ...}}
+# 1. 简介 (YahooQuery)
+yq = Ticker(ticker_symbol)
+summary = "N/A"
+sector = "Unknown"
+industry = "Unknown"
 try:
-    # 尝试获取公司画像 (适用于股票)
-    profile = yq_ticker.asset_profile
-    summary_data = profile.get(ticker_symbol, {})
-    
-    # 如果是字符串 (错误信息)，说明可能不是普通公司，尝试作为 ETF 获取
-    if isinstance(summary_data, str):
-         # 尝试获取基金画像 (适用于 ETF，如 VOO)
-         # 注意：ETF 的简介通常在 summary_profile 或 fund_profile 中
-         summary_data = yq_ticker.summary_profile.get(ticker_symbol, {})
-
-    # 提取字段
-    summary = summary_data.get('longBusinessSummary', None)
-    
-    # 如果还是没拿到，尝试 ETF 的特殊字段
-    if not summary:
-        summary = summary_data.get('longDescription', 'No summary available.')
-
-    sector = summary_data.get('sector', 'Unknown')
-    industry = summary_data.get('industry', 'Unknown')
-    
-    # ETF 特有字段
-    if sector == 'Unknown':
-        sector = summary_data.get('categoryName', 'ETF/Fund')
-
+    profile = yq.asset_profile.get(ticker_symbol, {})
+    if isinstance(profile, str): 
+        # 处理 ETF 或错误情况
+        summary_data = yq.summary_profile.get(ticker_symbol, {})
+        summary = summary_data.get('longDescription', 'No summary.')
+        sector = summary_data.get('categoryName', 'Unknown')
+    else:
+        summary = profile.get('longBusinessSummary', 'No summary.')
+        sector = profile.get('sector', 'Unknown')
+        industry = profile.get('industry', 'Unknown')
 except Exception as e:
-    print(f"[ERROR] YahooQuery failed: {e}")
-    summary = "Data fetch failed."
-    sector = "Error"
-    industry = "Error"
+    print(f"[WARN] Profile error: {e}")
 
-# 2. 构造文本内容
-content = f"""
-Symbol: {ticker_symbol}
-Sector: {sector}
-Industry: {industry}
-Business Summary:
+# 2. 行情 (YFinance)
+price_change = 0.0
+last_price = 0.0
+market_txt = "Market data unavailable"
+try:
+    hist = yf.Ticker(ticker_symbol).history(period="5d")
+    if not hist.empty:
+        last_price = hist['Close'].iloc[-1]
+        prev = hist['Close'].iloc[-2] if len(hist)>1 else last_price
+        price_change = ((last_price - prev) / prev) * 100
+        market_txt = f"Price: ${last_price:.2f}, Change: {price_change:.2f}%"
+except Exception as e:
+    print(f"[WARN] Market error: {e}")
+
+# 3. 新闻 (GoogleNews) - 可选，视 Docker 镜像是否安装而定
+news_txt = "No news fetcher available."
+try:
+    from GoogleNews import GoogleNews
+    gn = GoogleNews(period='3d')
+    gn.search(f"{ticker_symbol} stock")
+    news_items = []
+    for item in gn.result()[:3]:
+        news_items.append(f"- [{item.get('date')}] {item.get('title')}")
+    if news_items:
+        news_txt = "\n".join(news_items)
+except Exception:
+    pass # 忽略新闻模块缺失
+
+# 4. 组合 RAG 专用文本
+today = datetime.date.today().isoformat()
+full_text = f"""
+REPORT DATE: {today}
+TICKER: {ticker_symbol}
+SECTOR: {sector} / {industry}
+
+--- [MARKET SNAPSHOT] ---
+{market_txt}
+
+--- [BUSINESS SUMMARY] ---
 {summary}
+
+--- [RECENT NEWS] ---
+{news_txt}
 """
 
-# 3. 简单的质量检查
-# 如果内容太短，可能是被反爬了，打印警告到 stderr (会被 Go 捕获)
-if len(summary) < 50:
-    print(f"[WARNING] Summary is too short, possibly rate limited or invalid ticker.", file=sys.stderr)
-
-# 4. 保存文件
-filename = f"{ticker_symbol}_profile.txt"
+# 5. 保存文件
+filename = f"{ticker_symbol}_{today}_raw.txt"
 with open(filename, "w", encoding="utf-8") as f:
-    f.write(content)
+    f.write(full_text)
 
-# 5. 打印协议头
+# 6. 输出协议
 print(f"__FILE__:{filename}")
-print(f"Successfully processed {ticker_symbol}")
+
+# 输出 JSON 元数据 (单行，方便 Go 解析)
+meta = {
+    "ticker": ticker_symbol,
+    "date": today,
+    "price_change": round(price_change, 2),
+    "has_news": "GoogleNews" in sys.modules and len(news_txt) > 25
+}
+print(f"__META__:{json.dumps(meta)}")
+print("Done.")
 `

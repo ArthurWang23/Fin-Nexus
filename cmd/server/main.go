@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"go-nexus/internal/delivery/http"
 	v1 "go-nexus/internal/delivery/http/v1"
+	"go-nexus/internal/domain"
 	"go-nexus/internal/infrastructure/graph"
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/infrastructure/persistence"
@@ -62,12 +63,12 @@ func main() {
 		dbHost, dbUser, dbPassword, dbName, dbPort)
 
 	db := database.NewPostgresDB(dsn)
-	err := db.AutoMigrate(&database.DocumentModel{}, &database.DocumentChunkModel{})
+	err := db.AutoMigrate(&database.DocumentModel{}, &database.DocumentChunkModel{}, &domain.MorningBrief{})
 	if err != nil {
 		log.Fatalf("failed to migrate db: %v", err)
 	}
 	repo := persistence.NewPostgresRepo(db)
-
+	briefRepo := persistence.NewPostgresBriefRepo(db)
 	// 配置 LLM（优先使用环境变量，适合 Docker 环境）
 	llmConfig := &llm.Config{
 		APIKey:         getEnvOrDefault("LLM_API_KEY", viper.GetString("llm.api_key")),
@@ -112,7 +113,7 @@ func main() {
 	redisAddr := getEnvOrDefault("REDIS_HOST", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	agentActivities := activities.NewAgentActivities(agentService, rdb)
-	dataActivities := activities.NewDataActivities(agentService)
+	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
 	wsHandler := http.NewWSHandler(rdb, tClient)
 
 	// 初始化 Python 工具（必须在 worker 启动前完成）

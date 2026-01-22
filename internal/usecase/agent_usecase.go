@@ -231,16 +231,19 @@ func (uc *AgentUseCase) StreamChat(ctx context.Context, history []domain.Message
 }
 
 func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename string) error {
+	// RAG部分全部存
 	if err := uc.ragUC.AddDocumentText(ctx, text, filename); err != nil {
 		return err
 	}
-	graphText := text
-	if len(graphText) > 4000 {
-		graphText = graphText[:4000]
-	}
-
-	if err := uc.ragUC.BuildGraphFromText(ctx, graphText); err != nil {
-		fmt.Printf("Graph extraction warning: %v\n", err)
+	// 提取出长期信息存入图谱
+	graphText := extractGraphSafeContent(text)
+	if graphText != "" {
+		if len(graphText) > 4000 {
+			graphText = graphText[:4000]
+		}
+		if err := uc.ragUC.BuildGraphFromText(ctx, graphText); err != nil {
+			fmt.Printf("Graph extraction warning: %v\n", err)
+		}
 	}
 	return nil
 }
@@ -251,4 +254,19 @@ func CleanJSONBlock(text string) string {
 	text = strings.TrimPrefix(text, "```")
 	text = strings.TrimSuffix(text, "```")
 	return strings.TrimSpace(text)
+}
+
+func extractGraphSafeContent(text string) string {
+	startMarker := "=== [GRAPH_SAFE_START] ==="
+	endMarker := "=== [GRAPH_SAFE_END] ==="
+
+	startIndex := strings.Index(text, startMarker)
+	endIndex := strings.Index(text, endMarker)
+
+	if startIndex != -1 && endIndex != -1 && endIndex > startIndex {
+		// 返回标记中间的内容
+		return text[startIndex+len(startMarker) : endIndex]
+	}
+	// 找不到标记就不存graph防止污染
+	return ""
 }

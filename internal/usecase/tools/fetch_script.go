@@ -63,16 +63,17 @@ today = datetime.date.today().isoformat()
 full_text = f"""
 REPORT DATE: {today}
 TICKER: {ticker_symbol}
-SECTOR: {sector} / {industry}
 
---- [MARKET SNAPSHOT] ---
-{market_txt}
-
+=== [GRAPH_SAFE_START] ===
 --- [BUSINESS SUMMARY] ---
 {summary}
 
 --- [RECENT NEWS] ---
 {news_txt}
+=== [GRAPH_SAFE_END] ===
+
+--- [MARKET SNAPSHOT] ---
+{market_txt}
 """
 
 # 5. 保存文件

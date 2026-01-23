@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase/gateway"
+	"go-nexus/internal/usecase/repo"
 	"go-nexus/internal/usecase/tools"
 	"strings"
 	"text/template"
@@ -17,8 +18,9 @@ import (
 
 // Reasoning + Acting 循环
 type AgentUseCase struct {
-	llm   gateway.LLMClient
-	ragUC *RAGUseCase
+	llm      gateway.LLMClient
+	ragUC    *RAGUseCase
+	chatRepo repo.ChatHistoryRepository
 }
 
 type SupervisorDecision struct {
@@ -28,8 +30,8 @@ type SupervisorDecision struct {
 	FinalAnswer string `json:"final_answer"`
 }
 
-func NewAgentUseCase(llm gateway.LLMClient, ragUC *RAGUseCase) *AgentUseCase {
-	return &AgentUseCase{llm: llm, ragUC: ragUC}
+func NewAgentUseCase(llm gateway.LLMClient, ragUC *RAGUseCase, chatRepo repo.ChatHistoryRepository) *AgentUseCase {
+	return &AgentUseCase{llm: llm, ragUC: ragUC, chatRepo: chatRepo}
 }
 
 func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (string, error) {

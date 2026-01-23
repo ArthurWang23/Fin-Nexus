@@ -1,13 +1,14 @@
 package v1
 
 import (
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"go-nexus/internal/usecase"
 	"go-nexus/internal/workflow"
+	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"go.opentelemetry.io/otel"
 	"go.temporal.io/sdk/client"
-	"net/http"
 )
 
 type AgentHandler struct {
@@ -51,7 +52,7 @@ func (h *AgentHandler) MultiChat(c *gin.Context) {
 	tracer := otel.Tracer("http-handler")
 	ctx, span := tracer.Start(c.Request.Context(), "HTTP POST /agent")
 	defer span.End()
-	answer, err := h.agentUC.MultiAgentChat(ctx, req.Message)
+	answer, err := h.agentUC.MultiAgentChat(ctx, req.Message, req.SessionID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

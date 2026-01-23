@@ -1,13 +1,14 @@
 package http
 
 import (
+	"go-nexus/internal/workflow"
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/redis/go-redis/v9"
-	"go-nexus/internal/workflow"
 	"go.temporal.io/sdk/client"
-	"net/http"
 )
 
 var upgrader = websocket.Upgrader{
@@ -24,6 +25,10 @@ func NewWSHandler(rdb *redis.Client, tClient client.Client) *WSHandler {
 }
 
 func (h *WSHandler) HandleWS(c *gin.Context) {
+	sessionID := c.Query("session_id")
+	if sessionID == "" {
+		sessionID = "default-session"
+	}
 	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
@@ -40,7 +45,7 @@ func (h *WSHandler) HandleWS(c *gin.Context) {
 		ID:        "stream-flow-" + requestID,
 		TaskQueue: "agent-task-queue",
 	}
-	_, err = h.tClient.ExecuteWorkflow(c.Request.Context(), options, workflow.StreamMultiAgentWorkflow, userQuery, requestID)
+	_, err = h.tClient.ExecuteWorkflow(c.Request.Context(), options, workflow.StreamMultiAgentWorkflow, userQuery, requestID, sessionID)
 	if err != nil {
 		ws.WriteMessage(websocket.TextMessage, []byte("Error starting workflow"))
 		return

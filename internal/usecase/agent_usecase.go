@@ -120,21 +120,32 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 	return finalAnswer, err
 }
 
-func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string) (string, error) {
-	history := []domain.Message{}
+func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, sessionID string) (string, error) {
+	var contextHistory []domain.Message
+	if sessionID != "" {
+		var err error
+		contextHistory, err = uc.chatRepo.GetHistory(ctx, sessionID, 10)
+		if err != nil {
+			fmt.Printf(" Failed to load history: %v\n", err)
+		}
+	}
+	currentExecutionHistory := make([]domain.Message, len(contextHistory))
+	copy(currentExecutionHistory, contextHistory)
 
 	maxSteps := 5
+	finalAnswer := "任务执行步骤过多，已被强制终止。"
 	for i := 0; i < maxSteps; i++ {
 		fmt.Printf("\n--- Step %d: Supervisor is thinking ---\n", i+1)
 		// make decision
-		decision, err := uc.CallSupervisor(ctx, userQuery, history)
+		decision, err := uc.CallSupervisor(ctx, userQuery, currentExecutionHistory)
 		if err != nil {
 			return "", err
 		}
 		fmt.Printf(" Supervisor Decision: %s -> %s\n", decision.NextAgent, decision.Instruction)
 
 		if decision.NextAgent == "FINISH" {
-			return decision.FinalAnswer, nil
+			finalAnswer = decision.FinalAnswer
+			break
 		}
 
 		var workResult string
@@ -150,12 +161,18 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string) (s
 		if err != nil {
 			workResult = fmt.Sprintf("Error executing task: %v", err)
 		}
-		history = append(history, domain.Message{
-			Role:    domain.RoleUser, // 对主管来说，下属的汇报也可以看作一种输入
-			Content: fmt.Sprintf("【%s 的汇报】:\n%s", decision.NextAgent, workResult),
+
+		currentExecutionHistory = append(currentExecutionHistory, domain.Message{
+			Role:    domain.RoleUser,
+			Content: fmt.Sprintf("【%s 汇报】:\n%s", decision.NextAgent, workResult),
 		})
 	}
-	return "任务执行步骤过多，已被强制终止。", nil
+	if sessionID != "" {
+		// 保存问题与回答
+		uc.chatRepo.AddMessage(ctx, sessionID, domain.Message{Role: domain.RoleUser, Content: userQuery})
+		uc.chatRepo.AddMessage(ctx, sessionID, domain.Message{Role: domain.RoleAssistant, Content: finalAnswer})
+	}
+	return finalAnswer, nil
 }
 
 func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, history []domain.Message) (*SupervisorDecision, error) {

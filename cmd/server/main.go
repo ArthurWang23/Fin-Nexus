@@ -69,6 +69,10 @@ func main() {
 	}
 	repo := persistence.NewPostgresRepo(db)
 	briefRepo := persistence.NewPostgresBriefRepo(db)
+
+	redisAddr := getEnvOrDefault("REDIS_HOST", "localhost:6379")
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	chatRepo := persistence.NewRedisChatRepo(rdb)
 	// 配置 LLM（优先使用环境变量，适合 Docker 环境）
 	llmConfig := &llm.Config{
 		APIKey:         getEnvOrDefault("LLM_API_KEY", viper.GetString("llm.api_key")),
@@ -92,7 +96,7 @@ func main() {
 	reranker := llm.NewJinaReranker(jinaKey)
 	ragService := usecase.NewRAGUseCase(repo, repo, llmClient, graphRepo, reranker)
 	ingestService := usecase.NewIngestService(ragService, 5)
-	agentService := usecase.NewAgentUseCase(llmClient, ragService)
+	agentService := usecase.NewAgentUseCase(llmClient, ragService, chatRepo)
 	chatHandler := v1.NewChatHandler(ragService)
 	uploadHandler := v1.NewUploadHandler(ingestService)
 
@@ -110,9 +114,7 @@ func main() {
 	defer tClient.Close()
 	w := worker.New(tClient, "agent-task-queue", worker.Options{})
 
-	redisAddr := getEnvOrDefault("REDIS_HOST", "localhost:6379")
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-	agentActivities := activities.NewAgentActivities(agentService, rdb)
+	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo)
 	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
 	wsHandler := http.NewWSHandler(rdb, tClient)
 
@@ -131,6 +133,8 @@ func main() {
 	w.RegisterActivity(agentActivities.FinalReplyStream)
 	w.RegisterActivity(dataActivities.FetchAndIngest)
 	w.RegisterWorkflow(workflow.ScheduledDataIngestion)
+	w.RegisterActivity(agentActivities.LoadChatHistory)
+	w.RegisterActivity(agentActivities.SaveChatTurn)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)

@@ -1,9 +1,11 @@
 package v1
 
 import (
-	"github.com/gin-gonic/gin"
 	"go-nexus/internal/usecase"
 	"net/http"
+
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 type ChatHandler struct {
@@ -15,7 +17,8 @@ func NewChatHandler(ragUc *usecase.RAGUseCase) *ChatHandler {
 }
 
 type ChatRequest struct {
-	Message string `json:"message" binding:"required"`
+	Message   string `json:"message" binding:"required"`
+	SessionID string `json:"session_id"`
 }
 
 func (h *ChatHandler) Chat(c *gin.Context) {
@@ -26,14 +29,17 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 		})
 		return
 	}
-
-	answer, err := h.ragUc.SearchAndChat(c.Request.Context(), req.Message)
+	if req.SessionID == "" {
+		req.SessionID = uuid.New().String()
+	}
+	answer, err := h.ragUc.SearchAndChat(c.Request.Context(), req.Message, req.SessionID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
-		"response": answer,
+		"response":   answer,
+		"session_id": req.SessionID,
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -29,6 +30,8 @@ var (
 	botStyle    = lipgloss.NewStyle().Foreground(colorBot).Bold(true).MarginTop(1)
 	stepStyle   = lipgloss.NewStyle().Foreground(colorStep).Italic(true).MarginLeft(2)
 	errStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true)
+
+	sessionID = fmt.Sprintf("cli-%d", time.Now().Unix())
 )
 
 // --- 消息协议 ---
@@ -94,7 +97,7 @@ func (m model) Init() tea.Cmd {
 
 // --- WebSocket ---
 func connectWS() tea.Msg {
-	u := url.URL{Scheme: "ws", Host: "localhost:8080", Path: "/api/v1/ws/chat"}
+	u := url.URL{Scheme: "ws", Host: "localhost:8080", Path: "/api/v1/ws/chat", RawQuery: "session_id=" + sessionID}
 	c, _, err := websocket.DefaultDialer.Dial(u.String(), nil)
 	if err != nil {
 		return errMsg(err)

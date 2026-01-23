@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/redis/go-redis/v9"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase"
+	"go-nexus/internal/usecase/repo"
+
+	"github.com/redis/go-redis/v9"
 )
 
 type AgentActivities struct {
-	agentUC *usecase.AgentUseCase
-	rdb     *redis.Client
+	agentUC  *usecase.AgentUseCase
+	rdb      *redis.Client
+	chatRepo repo.ChatHistoryRepository
 }
 
 type SupervisorInput struct {
@@ -19,8 +22,15 @@ type SupervisorInput struct {
 	History []domain.Message // 需确保 domain.Message 可序列化
 }
 
-func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client) *AgentActivities {
-	return &AgentActivities{agentUC, rdb}
+// SaveChatInput 保存本轮对话
+type SaveChatInput struct {
+	SessionID   string
+	UserQuery   string
+	FinalAnswer string
+}
+
+func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client, chatRepo repo.ChatHistoryRepository) *AgentActivities {
+	return &AgentActivities{agentUC, rdb, chatRepo}
 }
 
 func (a *AgentActivities) SupervisorDecide(ctx context.Context, input SupervisorInput) (*usecase.SupervisorDecision, error) {
@@ -75,4 +85,26 @@ func (a *AgentActivities) FinalReplyStream(ctx context.Context, history []domain
 		a.publish(ctx, streamID, usecase.StreamMessage{Type: usecase.EventToken, Content: token})
 	}
 	return a.agentUC.StreamChat(ctx, history, tokenCallback)
+}
+
+func (a *AgentActivities) LoadChatHistory(ctx context.Context, sessionID string) ([]domain.Message, error) {
+	if sessionID == "" {
+		return []domain.Message{}, nil
+	}
+	return a.chatRepo.GetHistory(ctx, sessionID, 10)
+}
+
+func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput) error {
+	if input.SessionID == "" {
+		return nil
+	}
+	err := a.chatRepo.AddMessage(ctx, input.SessionID, domain.Message{
+		Role:    domain.RoleUser,
+		Content: input.UserQuery,
+	})
+	if err != nil {
+		return err
+	}
+	err = a.chatRepo.AddMessage(ctx, input.SessionID, domain.Message{Role: domain.RoleAssistant, Content: input.FinalAnswer})
+	return err
 }

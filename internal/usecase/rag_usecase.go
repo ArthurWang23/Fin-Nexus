@@ -29,6 +29,23 @@ type GraphExtractionResult struct {
 	Relations []graph.Relation `json:"relations"`
 }
 
+// llm 提取的 Entity id字符串（省 token），需转换
+type llmEntityDTO struct {
+	ID   string `json:"id"` // LLM 生成的 ID，如 "Jensen_Huang"
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+
+type llmRelationDTO struct {
+	SourceID string `json:"source"` // 这里接收字符串 ID
+	TargetID string `json:"target"` // 这里接收字符串 ID
+	Type     string `json:"type"`
+}
+type llmGraphResponseDTO struct {
+	Entities  []llmEntityDTO   `json:"entities"`
+	Relations []llmRelationDTO `json:"relations"`
+}
+
 func NewRAGUseCase(
 	docRepo repo.DocumentRepository,
 	vecRepo repo.VectorRepository,
@@ -234,13 +251,48 @@ func (uc *RAGUseCase) BuildGraphFromText(ctx context.Context, text string) error
 		return fmt.Errorf("llm chat error: %w", err)
 	}
 	cleanJSON := CleanJSONBlock(resp)
-	var result GraphExtractionResult
-	if err := json.Unmarshal([]byte(cleanJSON), &result); err != nil {
+	var dto llmGraphResponseDTO
+	if err := json.Unmarshal([]byte(cleanJSON), &dto); err != nil {
 		fmt.Printf(" Graph JSON Parse Error: %v\nResp: %s\n", err, resp)
 		return nil
 	}
-	if len(result.Entities) > 0 || len(result.Relations) > 0 {
-		err = uc.graphRepo.SaveKnowledgeGraph(ctx, result.Entities, result.Relations)
+	var finalEntities []graph.Entity
+	var finalRelations []graph.Relation
+	entityMap := make(map[string]graph.Entity)
+	for _, e := range dto.Entities {
+		// 转换 DTO -> Domain Entity
+		domainEntity := graph.Entity{
+			Name: e.Name,
+			Type: e.Type,
+		}
+		finalEntities = append(finalEntities, domainEntity)
+
+		// 记录映射: ID (如 "Jensen_Huang") -> Entity 对象
+		// 注意：如果 LLM 没返回 ID 字段，尝试用 Name 作为 Key
+		key := e.ID
+		if key == "" {
+			key = e.Name
+		}
+		entityMap[key] = domainEntity
+	}
+	for _, r := range dto.Relations {
+		sourceEntity, srcOk := entityMap[r.SourceID]
+		targetEntity, tgtOk := entityMap[r.TargetID]
+
+		// 只有当源和目标都在实体列表中找到时，才创建关系
+		if srcOk && tgtOk {
+			finalRelations = append(finalRelations, graph.Relation{
+				Source: sourceEntity,
+				Target: targetEntity,
+				Type:   r.Type,
+			})
+		} else {
+			fmt.Printf("Relation skipped: %s -> %s (Entity not found in map)\n", r.SourceID, r.TargetID)
+		}
+	}
+	if len(finalEntities) > 0 || len(finalRelations) > 0 {
+		fmt.Printf(" Storing Graph: %d Entities, %d Relations\n", len(finalEntities), len(finalRelations))
+		err = uc.graphRepo.SaveKnowledgeGraph(ctx, finalEntities, finalRelations)
 		if err != nil {
 			return fmt.Errorf("neo4j store failed: %w", err)
 		}

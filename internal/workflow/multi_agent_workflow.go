@@ -93,7 +93,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 	// workflow 开始前先加载历史
 	var contextHistory []domain.Message
 	if sessionID != "" {
-		err := workflow.ExecuteActivity(ctx, "AgentActivities.LoadChatHistory", sessionID).Get(ctx, &contextHistory)
+		err := workflow.ExecuteActivity(ctx, "LoadChatHistory", sessionID).Get(ctx, &contextHistory)
 		if err != nil {
 			workflow.GetLogger(ctx).Error("Failed to load chat history", "error", err)
 			contextHistory = []domain.Message{}
@@ -131,7 +131,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 					UserQuery:   userQuery,
 					FinalAnswer: finalAnswer,
 				}
-				_ = workflow.ExecuteActivity(ctx, "AgentActivities.SaveChatTurn", saveInput).Get(ctx, nil)
+				_ = workflow.ExecuteActivity(ctx, "SaveChatTurn", saveInput).Get(ctx, nil)
 			}
 			return finalAnswer, err
 		}

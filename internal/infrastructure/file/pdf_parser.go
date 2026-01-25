@@ -13,7 +13,6 @@ func NewPDFParse() *PDFParser {
 	return &PDFParser{}
 }
 
-// 将 io.Reader (文件流) 转化为纯文本
 func (p *PDFParser) Parse(reader io.ReaderAt, size int64) (string, error) {
 	r, err := pdf.NewReader(reader, size)
 	if err != nil {

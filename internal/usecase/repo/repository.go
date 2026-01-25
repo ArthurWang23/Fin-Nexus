@@ -16,5 +16,5 @@ type DocumentRepository interface {
 type VectorRepository interface {
 	StoreChunks(ctx context.Context, chunks []*domain.DocumentChunk) error
 	// 语义搜索，根据查询向量返回最相似 topK 个切片
-	SearchSimilar(ctx context.Context, vector []float32, topK int) ([]*domain.DocumentChunk, error)
+	SearchSimilar(ctx context.Context, vector []float32, topK int, userID string) ([]*domain.DocumentChunk, error)
 }

@@ -120,7 +120,7 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 	return finalAnswer, err
 }
 
-func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, sessionID string) (string, error) {
+func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, sessionID string, userID string) (string, error) {
 	var contextHistory []domain.Message
 	if sessionID != "" {
 		var err error
@@ -151,7 +151,7 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 		var workResult string
 		switch decision.NextAgent {
 		case "Researcher":
-			workResult, err = uc.RunResearcher(ctx, decision.Instruction)
+			workResult, err = uc.RunResearcher(ctx, decision.Instruction, userID)
 		case "Coder":
 			workResult, err = uc.RunCoder(ctx, decision.Instruction)
 		default:
@@ -199,9 +199,9 @@ func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, histor
 	return &decision, nil
 }
 
-func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string) (string, error) {
+func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string, userID string) (string, error) {
 	fmt.Printf(" Researcher is searching and summarizing: %s\n", instruction)
-	answer, err := uc.ragUC.SearchAndChat(ctx, instruction, PromptResearcher)
+	answer, err := uc.ragUC.SearchAndChat(ctx, instruction, userID, PromptResearcher)
 	if err != nil {
 		return "", fmt.Errorf("researcher failed: %w", err)
 	}
@@ -252,7 +252,7 @@ func (uc *AgentUseCase) StreamChat(ctx context.Context, history []domain.Message
 
 func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename string) error {
 	// RAG部分全部存
-	if err := uc.ragUC.AddDocumentText(ctx, text, filename); err != nil {
+	if err := uc.ragUC.AddDocumentText(ctx, text, filename, "system"); err != nil {
 		return err
 	}
 	// 提取出长期信息存入图谱
@@ -261,7 +261,7 @@ func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename stri
 		if len(graphText) > 4000 {
 			graphText = graphText[:4000]
 		}
-		if err := uc.ragUC.BuildGraphFromText(ctx, graphText); err != nil {
+		if err := uc.ragUC.BuildGraphFromText(ctx, graphText, "system"); err != nil {
 			fmt.Printf("Graph extraction warning: %v\n", err)
 		}
 	}

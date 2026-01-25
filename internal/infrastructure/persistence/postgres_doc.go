@@ -22,10 +22,11 @@ var _ repo.VectorRepository = (*PostgresRepo)(nil)
 
 func (r *PostgresRepo) Create(ctx context.Context, doc *domain.Document) error {
 	model := database.DocumentModel{
-		ID:     doc.ID,
-		Name:   doc.Name,
-		Type:   doc.Type,
-		Status: string(doc.Status),
+		ID:      doc.ID,
+		Name:    doc.Name,
+		Type:    doc.Type,
+		Status:  string(doc.Status),
+		OwnerID: doc.OwnerID,
 	}
 	return r.db.WithContext(ctx).Create(&model).Error
 }
@@ -36,9 +37,10 @@ func (r *PostgresRepo) GetByID(ctx context.Context, id string) (*domain.Document
 		return nil, err
 	}
 	return &domain.Document{
-		ID:     model.ID,
-		Name:   model.Name,
-		Status: domain.DocumentStatus(model.Status),
+		ID:      model.ID,
+		Name:    model.Name,
+		Status:  domain.DocumentStatus(model.Status),
+		OwnerID: model.OwnerID,
 	}, nil
 }
 
@@ -55,16 +57,17 @@ func (r *PostgresRepo) StoreChunks(ctx context.Context, chunks []*domain.Documen
 			Content:    chunk.Content,
 			PageNumber: chunk.PageNumber,
 			Vector:     pgvector.NewVector(chunk.Vector),
+			OwnerID:    chunk.OwnerID,
 		})
 	}
 	return r.db.WithContext(ctx).Create(&models).Error
 }
 
-func (r *PostgresRepo) SearchSimilar(ctx context.Context, vector []float32, topK int) ([]*domain.DocumentChunk, error) {
+func (r *PostgresRepo) SearchSimilar(ctx context.Context, vector []float32, topK int, userID string) ([]*domain.DocumentChunk, error) {
 	var models []database.DocumentChunkModel
 	vec := pgvector.NewVector(vector)
 
-	err := r.db.WithContext(ctx).Order(gorm.Expr("vector <=> ?", vec)).Limit(topK).Find(&models).Error
+	err := r.db.WithContext(ctx).Where("owner_id = ? OR owner_id = ?", userID, "system").Order(gorm.Expr("vector <=> ?", vec)).Limit(topK).Find(&models).Error
 	if err != nil {
 		return nil, err
 	}

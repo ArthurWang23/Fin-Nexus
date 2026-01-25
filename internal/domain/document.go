@@ -19,6 +19,8 @@ type Document struct {
 	Path      string         `json:"path"`
 	Status    DocumentStatus `json:"status"`
 	CreatedAt time.Time      `json:"created_at"`
+
+	OwnerID string `json:"owner_id"` // "system" 或 用户UUID
 }
 
 // 分块后的文件
@@ -28,4 +30,6 @@ type DocumentChunk struct {
 	Content    string    `json:"content"`
 	PageNumber int       `json:"page_number"` // 在原文档中的页数
 	Vector     []float32 `json:"-"`           // 向量数据 （ 不传JSON ）
+
+	OwnerID string `json:"owner_id"` // 冗余 ID 方便向量过滤
 }

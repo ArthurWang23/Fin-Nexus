@@ -13,7 +13,7 @@ import (
 
 const SignalApprove = "APPROVE_SIGNAL"
 
-func MultiAgentWorkflow(ctx workflow.Context, userQuery string) (string, error) {
+func MultiAgentWorkflow(ctx workflow.Context, userQuery string, userID string) (string, error) {
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: 2 * time.Minute,
 		RetryPolicy: &temporal.RetryPolicy{
@@ -44,7 +44,7 @@ func MultiAgentWorkflow(ctx workflow.Context, userQuery string) (string, error) 
 		var workerResult string
 		switch decision.NextAgent {
 		case "Researcher":
-			err = workflow.ExecuteActivity(ctx, "ResearcherSearch", decision.Instruction).Get(ctx, &workerResult)
+			err = workflow.ExecuteActivity(ctx, "ResearcherSearch", decision.Instruction, userID).Get(ctx, &workerResult)
 		case "Coder":
 			workflow.GetLogger(ctx).Info(" Code execution requested. Waiting for approval...", "code", decision.Instruction)
 			selector := workflow.NewSelector(ctx)
@@ -81,7 +81,7 @@ func MultiAgentWorkflow(ctx workflow.Context, userQuery string) (string, error) 
 	return "任务超时，步骤过多", nil
 }
 
-func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID string, sessionID string) (string, error) {
+func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID string, sessionID string, userID string) (string, error) {
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: time.Minute * 5, // 单个步骤最大超时
 		RetryPolicy: &temporal.RetryPolicy{
@@ -128,6 +128,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 			if sessionID != "" && err == nil {
 				saveInput := activities.SaveChatInput{
 					SessionID:   sessionID,
+					UserID:      userID,
 					UserQuery:   userQuery,
 					FinalAnswer: finalAnswer,
 				}
@@ -136,7 +137,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 			return finalAnswer, err
 		}
 		var workerResult string
-		err = workflow.ExecuteActivity(ctx, "WorkerRunStream", decision.NextAgent, decision.Instruction, streamID).Get(ctx, &workerResult)
+		err = workflow.ExecuteActivity(ctx, "WorkerRunStream", decision.NextAgent, decision.Instruction, streamID, userID).Get(ctx, &workerResult)
 		if err != nil {
 			// 如果 Worker 报错，不让 Workflow 失败，而是把错误信息放回 History 让 Supervisor 重试
 			workerResult = fmt.Sprintf("Error executing task: %v", err)

@@ -32,7 +32,8 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 	if req.SessionID == "" {
 		req.SessionID = uuid.New().String()
 	}
-	answer, err := h.ragUc.SearchAndChat(c.Request.Context(), req.Message, req.SessionID)
+	userID := c.MustGet("userID").(string)
+	answer, err := h.ragUc.SearchAndChat(c.Request.Context(), req.Message, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -45,6 +46,7 @@ func (h *ChatHandler) Chat(c *gin.Context) {
 
 // 测试 handler
 func (h *ChatHandler) AddKnowledge(c *gin.Context) {
+	userID := c.MustGet("userID").(string)
 	type Req struct {
 		Text string `json:"text"`
 	}
@@ -52,7 +54,7 @@ func (h *ChatHandler) AddKnowledge(c *gin.Context) {
 	if err := c.ShouldBindJSON(&req); err != nil {
 		return
 	}
-	err := h.ragUc.AddDocumentText(c.Request.Context(), req.Text, "test_text")
+	err := h.ragUc.AddDocumentText(c.Request.Context(), req.Text, "test_text", userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

@@ -77,7 +77,7 @@ func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 }
 
 // 带有知识检索的对话
-func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, systemPrompt ...string) (string, error) {
+func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID string, systemPrompt ...string) (string, error) {
 	var g errgroup.Group
 	var finalContexts []string
 	var entities []string
@@ -88,7 +88,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, systemPro
 		if err != nil {
 			return fmt.Errorf("llm embed error: %w", err)
 		}
-		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5)
+		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5, userID)
 		if err != nil {
 			return fmt.Errorf("vector search error: %w", err)
 		}
@@ -130,7 +130,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, systemPro
 	fmt.Printf(" Extracted Entities: %v\n", entities)
 	for _, entity := range entities {
 		// 查每个实体的一跳邻居
-		knowledge, err := uc.graphRepo.GetRelatedKnowledge(ctx, entity)
+		knowledge, err := uc.graphRepo.GetRelatedKnowledge(ctx, entity, userID)
 		if err != nil {
 			continue
 		}
@@ -179,14 +179,15 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, systemPro
 	return uc.llm.Chat(ctx, history)
 }
 
-func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename string) error {
+func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename string, userID string) error {
 	// 创建文档记录
 	docID := uuid.New().String()
 	doc := domain.Document{
-		ID:     docID,
-		Type:   "text",
-		Name:   filename,
-		Status: domain.StatusProcessing,
+		ID:      docID,
+		Type:    "text",
+		Name:    filename,
+		Status:  domain.StatusProcessing,
+		OwnerID: userID,
 	}
 	if err := uc.docRepo.Create(ctx, &doc); err != nil {
 		return err
@@ -208,6 +209,7 @@ func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename
 	}
 	for i, vec := range vectors {
 		chunks[i].Vector = vec
+		chunks[i].OwnerID = userID
 	}
 
 	if err := uc.vectorRepo.StoreChunks(ctx, chunks); err != nil {
@@ -216,9 +218,9 @@ func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename
 	return uc.docRepo.UpdateStatus(ctx, docID, domain.StatusIndexed)
 }
 
-func (uc *RAGUseCase) SearchOnly(ctx context.Context, query string) (string, error) {
+func (uc *RAGUseCase) SearchOnly(ctx context.Context, query string, userID string) (string, error) {
 	vectors, _ := uc.llm.Embed(ctx, []string{query})
-	chunks, _ := uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5)
+	chunks, _ := uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5, userID)
 
 	if len(chunks) == 0 {
 		return "没有找到相关资料。", nil
@@ -231,7 +233,7 @@ func (uc *RAGUseCase) SearchOnly(ctx context.Context, query string) (string, err
 	return buf.String(), nil
 }
 
-func (uc *RAGUseCase) BuildGraphFromText(ctx context.Context, text string) error {
+func (uc *RAGUseCase) BuildGraphFromText(ctx context.Context, text string, userID string) error {
 	// 渲染 Prompt
 	tmpl, err := template.New("graph").Parse(PromptExtractGraph)
 	if err != nil {
@@ -292,7 +294,7 @@ func (uc *RAGUseCase) BuildGraphFromText(ctx context.Context, text string) error
 	}
 	if len(finalEntities) > 0 || len(finalRelations) > 0 {
 		fmt.Printf(" Storing Graph: %d Entities, %d Relations\n", len(finalEntities), len(finalRelations))
-		err = uc.graphRepo.SaveKnowledgeGraph(ctx, finalEntities, finalRelations)
+		err = uc.graphRepo.SaveKnowledgeGraph(ctx, finalEntities, finalRelations, userID)
 		if err != nil {
 			return fmt.Errorf("neo4j store failed: %w", err)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"go-nexus/internal/workflow"
+	"go-nexus/pkg/auth"
 	"log"
 	"net/http"
 	"time"
@@ -30,10 +31,27 @@ func NewWSHandler(rdb *redis.Client, tClient client.Client) *WSHandler {
 
 // 全双工聊天
 func (h *WSHandler) HandleWS(c *gin.Context) {
+	// 先检查 Token
+	tokenStr := c.Query("token")
+	if tokenStr == "" {
+		// 尝试从 Header 获取 (有些 WebSocket 客户端支持，如 Postman)
+		// 但浏览器原生不支持
+		tokenStr = c.GetHeader("Sec-WebSocket-Protocol")
+	}
+	if tokenStr == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Token required"})
+		return
+	}
+	userID, err := auth.ParseToken(tokenStr)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
+		return
+	}
 	sessionID := c.Query("session_id")
 	if sessionID == "" {
 		sessionID = uuid.New().String()
 	}
+	// 升级连接
 	ws, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		return
@@ -42,10 +60,10 @@ func (h *WSHandler) HandleWS(c *gin.Context) {
 	// 开一个协程，来数据了就显示
 	go h.writePump(ws, sessionID)
 	// 主线程调用 ReadMessage。每收到一条，就启动一个新的 Temporal Workflow
-	h.readPump(c, ws, sessionID)
+	h.readPump(c, ws, sessionID, userID)
 }
 
-func (h *WSHandler) readPump(c *gin.Context, ws *websocket.Conn, sessionID string) {
+func (h *WSHandler) readPump(c *gin.Context, ws *websocket.Conn, sessionID string, userID string) {
 	for {
 		_, message, err := ws.ReadMessage()
 		if err != nil {
@@ -66,7 +84,7 @@ func (h *WSHandler) readPump(c *gin.Context, ws *websocket.Conn, sessionID strin
 			TaskQueue: "agent-task-queue",
 		}
 		// streamID 使用 sessionID 把消息推送到同一个 Redis
-		_, err = h.tClient.ExecuteWorkflow(context.Background(), options, workflow.StreamMultiAgentWorkflow, userQuery, sessionID, sessionID)
+		_, err = h.tClient.ExecuteWorkflow(context.Background(), options, workflow.StreamMultiAgentWorkflow, userQuery, sessionID, sessionID, userID)
 		if err != nil {
 			log.Printf("Failed to start workflow: %v", err)
 			continue

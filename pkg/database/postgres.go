@@ -22,7 +22,8 @@ type DocumentModel struct {
 	Name      string
 	Type      string
 	Status    string
-	CreatedAt int64 `gorm:"autoCreateTime"`
+	CreatedAt int64  `gorm:"autoCreateTime"`
+	OwnerID   string `gorm:"index"` // "system" 或 用户UUID
 }
 
 func (DocumentModel) TableName() string {
@@ -35,6 +36,7 @@ type DocumentChunkModel struct {
 	Content    string
 	PageNumber int
 	Vector     pgvector.Vector `gorm:"type:vector(1024)"`
+	OwnerID    string
 }
 
 func (DocumentChunkModel) TableName() string {

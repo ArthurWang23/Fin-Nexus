@@ -13,7 +13,6 @@ import (
 
 type IngestService struct {
 	ragUC      *RAGUseCase
-	pdfParser  *file.PDFParser
 	jobChannel chan *IngestJob
 	workerNum  int
 	wg         sync.WaitGroup
@@ -22,12 +21,12 @@ type IngestService struct {
 type IngestJob struct {
 	FileHeader *multipart.FileHeader
 	FileBuffer []byte
+	UserID     string
 }
 
 func NewIngestService(ragUC *RAGUseCase, workers int) *IngestService {
 	svc := &IngestService{
 		ragUC:      ragUC,
-		pdfParser:  file.NewPDFParse(),
 		jobChannel: make(chan *IngestJob, 100),
 		workerNum:  workers,
 	}
@@ -48,10 +47,11 @@ func (s *IngestService) StartWorkers() {
 	}
 }
 
-func (s *IngestService) SubmitJob(fh *multipart.FileHeader, fb []byte) {
+func (s *IngestService) SubmitJob(fh *multipart.FileHeader, fb []byte, userID string) {
 	s.jobChannel <- &IngestJob{
 		FileHeader: fh,
 		FileBuffer: fb,
+		UserID:     userID,
 	}
 }
 
@@ -65,8 +65,14 @@ func (s *IngestService) processJob(workerID int, job *IngestJob) {
 	}
 	resultChan := make(chan parseResult, 1)
 	go func() {
+		// 根据文件扩展名获取合适的解析器
+		parser, err := file.GetParser(job.FileHeader.Filename)
+		if err != nil {
+			resultChan <- parseResult{content: "", err: fmt.Errorf("unsupported file type: %w", err)}
+			return
+		}
 		reader := bytes.NewReader(job.FileBuffer)
-		content, err := s.pdfParser.Parse(reader, int64(len(job.FileBuffer)))
+		content, err := parser.Parse(reader, int64(len(job.FileBuffer)))
 		resultChan <- parseResult{content: content, err: err}
 	}()
 	var content string
@@ -81,8 +87,13 @@ func (s *IngestService) processJob(workerID int, job *IngestJob) {
 		}
 		content = res.content
 	}
-	fmt.Printf("📄 [Preview]: %s\n", content[:min(200, len(content))])
-	err := s.ragUC.AddDocumentText(ctx, content, job.FileHeader.Filename)
+	previewLen := min(200, len(content))
+	if previewLen > 0 {
+		fmt.Printf(" [Preview]: %s\n", content[:previewLen])
+	} else {
+		fmt.Printf(" [Preview]: (empty content)\n")
+	}
+	err := s.ragUC.AddDocumentText(ctx, content, job.FileHeader.Filename, job.UserID)
 	if err != nil {
 		log.Printf("Worker %d storage error: %v", workerID, err)
 		return
@@ -93,7 +104,7 @@ func (s *IngestService) processJob(workerID int, job *IngestJob) {
 	if len(graphText) > 4000 {
 		graphText = graphText[:4000]
 	}
-	err = s.ragUC.BuildGraphFromText(context.Background(), graphText)
+	err = s.ragUC.BuildGraphFromText(context.Background(), graphText, job.UserID)
 	if err != nil {
 		log.Printf(" Worker %d graph extraction error: %v", workerID, err)
 		// 图谱提取失败不应该标记为整个任务失败，打个日志就行

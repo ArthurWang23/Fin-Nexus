@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"go-nexus/internal/delivery/http"
+	"go-nexus/internal/delivery/http/middleware"
 	v1 "go-nexus/internal/delivery/http/v1"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/infrastructure/graph"
@@ -63,12 +64,16 @@ func main() {
 		dbHost, dbUser, dbPassword, dbName, dbPort)
 
 	db := database.NewPostgresDB(dsn)
-	err := db.AutoMigrate(&database.DocumentModel{}, &database.DocumentChunkModel{}, &domain.MorningBrief{})
+	err := db.AutoMigrate(&domain.User{}, &domain.ChatSession{}, domain.ChatMessage{}, &database.DocumentModel{}, &database.DocumentChunkModel{}, &domain.MorningBrief{})
 	if err != nil {
 		log.Fatalf("failed to migrate db: %v", err)
 	}
+	userRepo := persistence.NewPostgresUserRepo(db)
+	authService := usecase.NewAuthUseCase(userRepo)
+	authHandler := http.NewAuthHandler(authService)
 	repo := persistence.NewPostgresRepo(db)
 	briefRepo := persistence.NewPostgresBriefRepo(db)
+	sessionRepo := persistence.NewPostgresSessionRepo(db)
 
 	redisAddr := getEnvOrDefault("REDIS_HOST", "localhost:6379")
 	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
@@ -114,7 +119,7 @@ func main() {
 	defer tClient.Close()
 	w := worker.New(tClient, "agent-task-queue", worker.Options{})
 
-	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo)
+	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo, sessionRepo)
 	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
 	wsHandler := http.NewWSHandler(rdb, tClient)
 
@@ -140,19 +145,28 @@ func main() {
 			log.Fatalf("Unable to start worker: %v", err)
 		}
 	}()
-	agentHandler := v1.NewAgentHandler(agentService, tClient)
+	agentHandler := v1.NewAgentHandler(agentService, tClient, sessionRepo)
 	r := gin.Default()
-	api := r.Group("/api/v1")
+	public := r.Group("/api/v1")
 	{
-		api.POST("/chat", chatHandler.Chat)
-		api.POST("/knowledge", chatHandler.AddKnowledge)
-		api.POST("/upload", uploadHandler.Upload)
-		api.POST("/agent", agentHandler.Chat)
-		api.POST("/multi-agent", agentHandler.MultiChat)
-		api.POST("/async-chat", agentHandler.AsyncChat)
-		api.POST("/agent-approve", agentHandler.Approve)
-		api.GET("/ws/chat", wsHandler.HandleWS)
+		public.POST("/register", authHandler.Register)
+		public.POST("/login", authHandler.Login)
 	}
+	protected := r.Group("/api/v1")
+	protected.Use(middleware.JWTAuth())
+	{
+		protected.POST("/chat", chatHandler.Chat)
+		protected.POST("/knowledge", chatHandler.AddKnowledge)
+		protected.POST("/upload", uploadHandler.Upload)
+		protected.POST("/agent", agentHandler.Chat)
+		protected.POST("/multi-agent", agentHandler.MultiChat)
+		protected.POST("/async-chat", agentHandler.AsyncChat)
+		protected.POST("/agent-approve", agentHandler.Approve)
+		protected.GET("/sessions", agentHandler.ListSessions)
+		protected.GET("/sessions/:id", agentHandler.GetSessionHistory)
+	}
+	// websocket 不能传 header
+	public.GET("/ws/chat", wsHandler.HandleWS)
 	r.Static("/images", "./public/images")
 
 	// 服务器端口（优先使用环境变量）

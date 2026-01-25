@@ -4,17 +4,20 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/google/uuid"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/usecase"
 	"go-nexus/internal/usecase/repo"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 )
 
 type AgentActivities struct {
-	agentUC  *usecase.AgentUseCase
-	rdb      *redis.Client
-	chatRepo repo.ChatHistoryRepository
+	agentUC     *usecase.AgentUseCase
+	rdb         *redis.Client
+	chatRepo    repo.ChatHistoryRepository
+	sessionRepo domain.SessionRepository
 }
 
 type SupervisorInput struct {
@@ -22,23 +25,24 @@ type SupervisorInput struct {
 	History []domain.Message // 需确保 domain.Message 可序列化
 }
 
-// SaveChatInput 保存本轮对话
+// SaveChatInput 保存本轮对话,需同时存 redis （llm context）和 postgres （历史记录）
 type SaveChatInput struct {
 	SessionID   string
+	UserID      string // 区分用户
 	UserQuery   string
 	FinalAnswer string
 }
 
-func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client, chatRepo repo.ChatHistoryRepository) *AgentActivities {
-	return &AgentActivities{agentUC, rdb, chatRepo}
+func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client, chatRepo repo.ChatHistoryRepository, sessionRepo domain.SessionRepository) *AgentActivities {
+	return &AgentActivities{agentUC, rdb, chatRepo, sessionRepo}
 }
 
 func (a *AgentActivities) SupervisorDecide(ctx context.Context, input SupervisorInput) (*usecase.SupervisorDecision, error) {
 	return a.agentUC.CallSupervisor(ctx, input.Query, input.History)
 }
 
-func (a *AgentActivities) ResearcherSearch(ctx context.Context, instruction string) (string, error) {
-	return a.agentUC.RunResearcher(ctx, instruction)
+func (a *AgentActivities) ResearcherSearch(ctx context.Context, instruction string, userID string) (string, error) {
+	return a.agentUC.RunResearcher(ctx, instruction, userID)
 }
 
 func (a *AgentActivities) CoderRun(ctx context.Context, instruction string) (string, error) {
@@ -62,7 +66,7 @@ func (a *AgentActivities) SupervisorDecideStream(ctx context.Context, input Supe
 	return a.agentUC.CallSupervisor(ctx, input.Query, input.History)
 }
 
-func (a *AgentActivities) WorkerRunStream(ctx context.Context, agentName, instruction, streamID string) (string, error) {
+func (a *AgentActivities) WorkerRunStream(ctx context.Context, agentName, instruction, streamID string, userID string) (string, error) {
 	a.publish(ctx, streamID, usecase.StreamMessage{
 		Type:    usecase.EventStep,
 		Content: fmt.Sprintf(" %s 正在执行: %s", agentName, instruction),
@@ -71,7 +75,7 @@ func (a *AgentActivities) WorkerRunStream(ctx context.Context, agentName, instru
 		// 研究员可以复用 RAG，但如果我们想把 RAG 的思考过程也流式出来，
 		// 需要改造 RAGUseCase。这里简单起见，Researcher 还是返回一次性结果，
 		// 但我们在执行期间发个 "Searching..." 的状态
-		return a.agentUC.RunResearcher(ctx, instruction)
+		return a.agentUC.RunResearcher(ctx, instruction, userID)
 	}
 	if agentName == "Coder" {
 		// Coder 类似
@@ -106,5 +110,44 @@ func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput)
 		return err
 	}
 	err = a.chatRepo.AddMessage(ctx, input.SessionID, domain.Message{Role: domain.RoleAssistant, Content: input.FinalAnswer})
-	return err
+
+	_, err = a.sessionRepo.GetSessionByID(input.SessionID)
+	if err != nil {
+		// 假设找不到就是不存在 (Gorm error handling 简化处理)
+		// 创建新 Session
+		newSession := &domain.ChatSession{
+			ID:        input.SessionID,
+			UserID:    input.UserID,
+			Title:     truncateString(input.UserQuery, 20),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+		}
+		if err := a.sessionRepo.CreateSession(newSession); err != nil {
+			return fmt.Errorf("failed to create session: %w", err)
+		}
+	}
+	userMsg := &domain.ChatMessage{
+		ID:        uuid.New().String(),
+		SessionID: input.SessionID,
+		Role:      "user",
+		Content:   input.UserQuery,
+		CreatedAt: time.Now(),
+	}
+	a.sessionRepo.SaveMessage(userMsg)
+	aiMsg := &domain.ChatMessage{
+		ID:        uuid.New().String(),
+		SessionID: input.SessionID,
+		Role:      "assistant",
+		Content:   input.FinalAnswer,
+		CreatedAt: time.Now().Add(time.Second),
+	}
+	a.sessionRepo.SaveMessage(aiMsg)
+	return nil
+}
+
+func truncateString(s string, max int) string {
+	if len([]rune(s)) > max {
+		return string([]rune(s)[:max]) + "..."
+	}
+	return s
 }

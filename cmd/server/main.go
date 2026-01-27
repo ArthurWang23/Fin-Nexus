@@ -146,11 +146,15 @@ func main() {
 		}
 	}()
 	agentHandler := v1.NewAgentHandler(agentService, tClient, sessionRepo)
+	briefUC := usecase.NewBriefUseCase(briefRepo, rdb)
+	briefHandler := v1.NewBriefHandler(briefUC)
+
 	r := gin.Default()
 	public := r.Group("/api/v1")
 	{
 		public.POST("/register", authHandler.Register)
 		public.POST("/login", authHandler.Login)
+		public.GET("/brief", briefHandler.GetBrief)
 	}
 	protected := r.Group("/api/v1")
 	protected.Use(middleware.JWTAuth())

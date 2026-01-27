@@ -89,10 +89,21 @@ func (a *DataActivities) FetchAndIngest(ctx context.Context, ticker string) (str
 		fmt.Printf(" Failed to save brief to DB: %v\n", err)
 	}
 
-	// 存入redis 快报
-	redisKey := fmt.Sprintf("brief:report:%s:latest", ticker)
-	a.rdb.Set(ctx, redisKey, finalReport, 24*time.Hour)
-	fmt.Printf("[FetchAndIngest] Successfully ingested %s\n", ticker)
+	// ---------------- Redis Caching Strategy ----------------
+	// 1. Store full object
+	briefJSON, _ := json.Marshal(brief)
+	cacheKey := fmt.Sprintf("brief:object:%s:%s", meta.Date, ticker)
+	a.rdb.Set(ctx, cacheKey, briefJSON, 48*time.Hour)
+
+	// 2. Add to daily index
+	indexKey := fmt.Sprintf("brief:index:%s", meta.Date)
+	a.rdb.SAdd(ctx, indexKey, ticker)
+	a.rdb.Expire(ctx, indexKey, 48*time.Hour)
+
+	// 3. Update global latest date
+	a.rdb.Set(ctx, "brief:latest_date", meta.Date, 48*time.Hour)
+
+	fmt.Printf("[FetchAndIngest] Successfully ingested %s and cached in Redis\n", ticker)
 	return fmt.Sprintf("Ingested %s (Chg: %.2f%%)", ticker, meta.PriceChange), nil
 }
 

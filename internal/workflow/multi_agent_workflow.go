@@ -106,6 +106,11 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 	maxSteps := 20
 	for i := 0; i < maxSteps; i++ {
 		fullHistory := append([]domain.Message{}, contextHistory...)
+		// FIX: 把当前用户的问题也加入到执行上下文中
+		fullHistory = append(fullHistory, domain.Message{
+			Role:    domain.RoleUser,
+			Content: userQuery,
+		})
 		fullHistory = append(fullHistory, executionSteps...)
 
 		var decision usecase.SupervisorDecision

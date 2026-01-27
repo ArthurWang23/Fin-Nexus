@@ -21,4 +21,5 @@ type MorningBrief struct {
 
 type BriefRepository interface {
 	Save(brief *MorningBrief) error
+	GetLatest(date string) ([]MorningBrief, error)
 }

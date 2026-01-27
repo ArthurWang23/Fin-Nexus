@@ -132,6 +132,12 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 	currentExecutionHistory := make([]domain.Message, len(contextHistory))
 	copy(currentExecutionHistory, contextHistory)
 
+	// FIX: 把当前用户的问题也加入到执行上下文中，否则 LLM 会以为还在上一轮对话
+	currentExecutionHistory = append(currentExecutionHistory, domain.Message{
+		Role:    domain.RoleUser,
+		Content: userQuery,
+	})
+
 	maxSteps := 5
 	finalAnswer := "任务执行步骤过多，已被强制终止。"
 	for i := 0; i < maxSteps; i++ {
@@ -239,8 +245,11 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 			_ = json.Unmarshal([]byte(call.Args), &args)
 
 			// 真正执行
-			output, _ := tools.RunPythonCode(args.Code)
+			output, files := tools.RunPythonCode(args.Code)
 			sb.WriteString(fmt.Sprintf("Code:\n%s\nOutput:\n%s\n", args.Code, output))
+			if len(files) > 0 {
+				sb.WriteString(fmt.Sprintf("Generated Files: %v\n", files))
+			}
 		}
 	}
 	return sb.String(), nil

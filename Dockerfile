@@ -22,7 +22,7 @@ FROM alpine:latest
 WORKDIR /app
 
 # 安装 ca-certificates 否则 HTTPS 请求 (OpenAI) 会报错
-RUN apk --no-cache add ca-certificates tzdata
+RUN apk --no-cache add ca-certificates tzdata openssl
 
 # 从编译阶段复制二进制文件
 COPY --from=builder /app/main .

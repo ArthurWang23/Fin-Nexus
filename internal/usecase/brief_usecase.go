@@ -60,3 +60,8 @@ func (uc *BriefUseCase) GetMorningBrief(ctx context.Context, date string) ([]dom
 	// 2. Fallback to DB
 	return uc.repo.GetLatest(date)
 }
+
+// GetLatestVersion returns the latest brief version (date) from Redis
+func (uc *BriefUseCase) GetLatestVersion(ctx context.Context) (string, error) {
+	return uc.rdb.Get(ctx, "brief:latest_date").Result()
+}

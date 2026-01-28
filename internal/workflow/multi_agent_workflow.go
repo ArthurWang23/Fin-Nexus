@@ -30,6 +30,7 @@ func MultiAgentWorkflow(ctx workflow.Context, userQuery string, userID string) (
 		input := activities.SupervisorInput{
 			Query:   userQuery,
 			History: history,
+			UserID:  userID,
 		}
 		// ExecuteActivity 替代了普通的函数调用
 		// Temporal 会记录这一步有没有完成。如果 Crash 了，重启后会直接跳过已完成的步骤。
@@ -65,7 +66,7 @@ func MultiAgentWorkflow(ctx workflow.Context, userQuery string, userID string) (
 
 			selector.Select(ctx)
 			if approved {
-				err = workflow.ExecuteActivity(ctx, "CoderRun", decision.Instruction).Get(ctx, &workerResult)
+				err = workflow.ExecuteActivity(ctx, "CoderRun", decision.Instruction, userID).Get(ctx, &workerResult)
 			} else {
 				workerResult = "User REJECTED the code execution request. Reason: " + manualFeedback
 			}
@@ -117,6 +118,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 		input := activities.SupervisorInput{
 			Query:   userQuery,
 			History: fullHistory,
+			UserID:  userID,
 		}
 		err := workflow.ExecuteActivity(ctx, "SupervisorDecideStream", input, streamID).Get(ctx, &decision)
 		if err != nil {
@@ -129,7 +131,7 @@ func StreamMultiAgentWorkflow(ctx workflow.Context, userQuery string, streamID s
 				Content: fmt.Sprintf("任务已完成。主管的总结思路是: %s。请据此给用户一个完整、友好的最终回复。", decision.FinalAnswer),
 			})
 
-			err := workflow.ExecuteActivity(ctx, "FinalReplyStream", promptForFinal, streamID).Get(ctx, &finalAnswer)
+			err := workflow.ExecuteActivity(ctx, "FinalReplyStream", promptForFinal, streamID, userID).Get(ctx, &finalAnswer)
 			if sessionID != "" && err == nil {
 				saveInput := activities.SaveChatInput{
 					SessionID:   sessionID,

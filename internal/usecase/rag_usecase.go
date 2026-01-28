@@ -20,7 +20,7 @@ import (
 type RAGUseCase struct {
 	docRepo    repo.DocumentRepository
 	vectorRepo repo.VectorRepository
-	llm        gateway.LLMClient
+	systemLLM  gateway.LLMClient // 用于 embedding 以及 researcher 兜底
 	graphRepo  *graph.Neo4jRepo
 	reranker   gateway.RerankClient
 }
@@ -56,7 +56,7 @@ func NewRAGUseCase(
 	return &RAGUseCase{
 		docRepo:    docRepo,
 		vectorRepo: vecRepo,
-		llm:        llm,
+		systemLLM:  llm,
 		graphRepo:  graphRepo,
 		reranker:   reranker,
 	}
@@ -69,7 +69,7 @@ func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 		{Role: domain.RoleUser, Content: msg},
 	}
 
-	response, err := uc.llm.Chat(ctx, history)
+	response, err := uc.systemLLM.Chat(ctx, history)
 	if err != nil {
 		return "", fmt.Errorf("llm chat error: %w", err)
 	}
@@ -77,18 +77,19 @@ func (uc *RAGUseCase) Chat(ctx context.Context, msg string) (string, error) {
 }
 
 // 带有知识检索的对话
-func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID string, systemPrompt ...string) (string, error) {
+func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID string, chatLLM gateway.LLMClient, systemPrompt ...string) (string, error) {
 	var g errgroup.Group
 	var finalContexts []string
 	var entities []string
 
 	g.Go(func() error {
 		var chunks []*domain.DocumentChunk
-		vectors, err := uc.llm.Embed(ctx, []string{query})
+		// 向量必须用默认模型 否则空间不一致
+		vectors, err := uc.systemLLM.Embed(ctx, []string{query})
 		if err != nil {
 			return fmt.Errorf("llm embed error: %w", err)
 		}
-		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5, userID)
+		chunks, err = uc.vectorRepo.SearchSimilar(ctx, vectors[0], 10, userID)
 		if err != nil {
 			return fmt.Errorf("vector search error: %w", err)
 		}
@@ -97,7 +98,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID st
 			candidates = append(candidates, chunk.Content)
 		}
 		fmt.Printf(" Reranking %d documents using Jina...\n", len(chunks))
-		rankedResults, err := uc.reranker.Rerank(ctx, query, candidates, 2)
+		rankedResults, err := uc.reranker.Rerank(ctx, query, candidates, 5)
 		if err != nil {
 			fmt.Printf("Jina Rerank failed: %v, fallback to vector sort\n", err)
 			// 降级：直接取向量前5
@@ -120,7 +121,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID st
 
 	g.Go(func() error {
 		var err error
-		entities, err = uc.extractEntities(ctx, query)
+		entities, err = uc.extractEntities(ctx, query, chatLLM)
 		return err
 	})
 	if err := g.Wait(); err != nil {
@@ -165,7 +166,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID st
 参考资料:
 %s`, systemPrompt[0], contextBuilder.String())
 	} else {
-		finalSystemPrompt = fmt.Sprintf(`你是一个智能助手。请结合以下资料回答问题。
+		finalSystemPrompt = fmt.Sprintf(`你是一个股票金融助手。请结合以下资料回答问题。
 优先基于【知识图谱信息】理清实体间的关系，再结合【文档片段】补充细节。
 
 参考资料:
@@ -176,7 +177,7 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID st
 		{Role: domain.RoleSystem, Content: finalSystemPrompt},
 		{Role: domain.RoleUser, Content: query},
 	}
-	return uc.llm.Chat(ctx, history)
+	return chatLLM.Chat(ctx, history)
 }
 
 func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename string, userID string) error {
@@ -199,7 +200,7 @@ func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename
 	for _, c := range chunks {
 		texts = append(texts, c.Content)
 	}
-	vectors, err := uc.llm.Embed(ctx, texts)
+	vectors, err := uc.systemLLM.Embed(ctx, texts)
 	if err != nil {
 		return fmt.Errorf("embedding failed: %w", err)
 	}
@@ -219,7 +220,7 @@ func (uc *RAGUseCase) AddDocumentText(ctx context.Context, text string, filename
 }
 
 func (uc *RAGUseCase) SearchOnly(ctx context.Context, query string, userID string) (string, error) {
-	vectors, _ := uc.llm.Embed(ctx, []string{query})
+	vectors, _ := uc.systemLLM.Embed(ctx, []string{query})
 	chunks, _ := uc.vectorRepo.SearchSimilar(ctx, vectors[0], 5, userID)
 
 	if len(chunks) == 0 {
@@ -248,7 +249,9 @@ func (uc *RAGUseCase) BuildGraphFromText(ctx context.Context, text string, userI
 	msgs := []domain.Message{
 		{Role: domain.RoleUser, Content: buf.String()},
 	}
-	resp, err := uc.llm.Chat(ctx, msgs)
+	// 鉴于 morning_brief和用户上传文件都会触发
+	// 统统使用默认 llm
+	resp, err := uc.systemLLM.Chat(ctx, msgs)
 	if err != nil {
 		return fmt.Errorf("llm chat error: %w", err)
 	}
@@ -340,7 +343,7 @@ func (uc *RAGUseCase) smartSplit(docID, text, filename string, chunkSize int) []
 }
 
 // extractEntities 利用 LLM 从用户问题中提取搜索关键词
-func (uc *RAGUseCase) extractEntities(ctx context.Context, query string) ([]string, error) {
+func (uc *RAGUseCase) extractEntities(ctx context.Context, query string, llm gateway.LLMClient) ([]string, error) {
 	// 1. 渲染 Prompt
 	tmpl, _ := template.New("query_extract").Parse(PromptQueryEntityExtraction)
 	var buf bytes.Buffer
@@ -353,7 +356,7 @@ func (uc *RAGUseCase) extractEntities(ctx context.Context, query string) ([]stri
 		{Role: domain.RoleUser, Content: buf.String()},
 	}
 
-	resp, err := uc.llm.Chat(ctx, history)
+	resp, err := llm.Chat(ctx, history)
 	if err != nil {
 		return nil, err
 	}

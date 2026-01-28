@@ -14,6 +14,7 @@ import (
 	"go-nexus/internal/usecase/tools"
 	"go-nexus/internal/workflow"
 	"go-nexus/internal/workflow/activities"
+	"go-nexus/pkg/crypto"
 	"go-nexus/pkg/database"
 	"go-nexus/pkg/telemetry"
 	"log"
@@ -64,7 +65,7 @@ func main() {
 		dbHost, dbUser, dbPassword, dbName, dbPort)
 
 	db := database.NewPostgresDB(dsn)
-	err := db.AutoMigrate(&domain.User{}, &domain.ChatSession{}, domain.ChatMessage{}, &database.DocumentModel{}, &database.DocumentChunkModel{}, &domain.MorningBrief{})
+	err := db.AutoMigrate(&domain.User{}, &domain.ChatSession{}, domain.ChatMessage{}, &database.DocumentModel{}, &database.DocumentChunkModel{}, &domain.MorningBrief{}, &domain.UserModelConfig{})
 	if err != nil {
 		log.Fatalf("failed to migrate db: %v", err)
 	}
@@ -101,8 +102,19 @@ func main() {
 	reranker := llm.NewJinaReranker(jinaKey)
 	ragService := usecase.NewRAGUseCase(repo, repo, llmClient, graphRepo, reranker)
 	ingestService := usecase.NewIngestService(ragService, 5)
-	agentService := usecase.NewAgentUseCase(llmClient, ragService, chatRepo)
-	chatHandler := v1.NewChatHandler(ragService)
+	llmFactory := llm.NewLLMFactory(llmClient)
+
+	// 获取 API Key 加密主密钥
+	masterKey, err := crypto.GetMasterKey()
+	if err != nil {
+		log.Printf("⚠️  Warning: %v - API keys will NOT be encrypted", err)
+		masterKey = nil // 开发环境可允许不加密，生产环境应强制要求
+	} else {
+		log.Printf("✅ API Key encryption enabled (master key loaded, %d bytes)", len(masterKey))
+	}
+	configRepo := persistence.NewConfigRepo(db, masterKey)
+
+	agentService := usecase.NewAgentUseCase(llmFactory, ragService, chatRepo, configRepo)
 	uploadHandler := v1.NewUploadHandler(ingestService)
 
 	temporalHost := os.Getenv("TEMPORAL_HOST")
@@ -148,6 +160,7 @@ func main() {
 	agentHandler := v1.NewAgentHandler(agentService, tClient, sessionRepo)
 	briefUC := usecase.NewBriefUseCase(briefRepo, rdb)
 	briefHandler := v1.NewBriefHandler(briefUC)
+	configHandler := http.NewConfigHandler(configRepo)
 
 	r := gin.Default()
 	public := r.Group("/api/v1")
@@ -155,19 +168,19 @@ func main() {
 		public.POST("/register", authHandler.Register)
 		public.POST("/login", authHandler.Login)
 		public.GET("/brief", briefHandler.GetBrief)
+		public.GET("/brief/version", briefHandler.GetBriefVersion)
+		public.GET("/models", configHandler.GetAvailableModels) // 公开模型列表
 	}
 	protected := r.Group("/api/v1")
 	protected.Use(middleware.JWTAuth())
 	{
-		protected.POST("/chat", chatHandler.Chat)
-		protected.POST("/knowledge", chatHandler.AddKnowledge)
 		protected.POST("/upload", uploadHandler.Upload)
-		protected.POST("/agent", agentHandler.Chat)
-		protected.POST("/multi-agent", agentHandler.MultiChat)
-		protected.POST("/async-chat", agentHandler.AsyncChat)
 		protected.POST("/agent-approve", agentHandler.Approve)
 		protected.GET("/sessions", agentHandler.ListSessions)
 		protected.GET("/sessions/:id", agentHandler.GetSessionHistory)
+		protected.GET("/config", configHandler.GetModelConfigs)
+		protected.POST("/config", configHandler.UpdateModelConfig)
+		protected.DELETE("/config", configHandler.DeleteModelConfig)
 	}
 	// websocket 不能传 header
 	public.GET("/ws/chat", wsHandler.HandleWS)

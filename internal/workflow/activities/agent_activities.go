@@ -24,6 +24,7 @@ type AgentActivities struct {
 type SupervisorInput struct {
 	Query   string
 	History []domain.Message // 需确保 domain.Message 可序列化
+	UserID  string           // 根据 UserID 获取 LLMClient配置
 }
 
 // SaveChatInput 保存本轮对话,需同时存 redis （llm context）和 postgres （历史记录）
@@ -39,15 +40,15 @@ func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client, chatRe
 }
 
 func (a *AgentActivities) SupervisorDecide(ctx context.Context, input SupervisorInput) (*usecase.SupervisorDecision, error) {
-	return a.agentUC.CallSupervisor(ctx, input.Query, input.History)
+	return a.agentUC.CallSupervisor(ctx, input.Query, input.UserID, input.History)
 }
 
 func (a *AgentActivities) ResearcherSearch(ctx context.Context, instruction string, userID string) (string, error) {
 	return a.agentUC.RunResearcher(ctx, instruction, userID)
 }
 
-func (a *AgentActivities) CoderRun(ctx context.Context, instruction string) (string, error) {
-	return a.agentUC.RunCoder(ctx, instruction)
+func (a *AgentActivities) CoderRun(ctx context.Context, instruction string, userID string) (string, error) {
+	return a.agentUC.RunCoder(ctx, instruction, userID)
 }
 
 func (a *AgentActivities) publish(ctx context.Context, streamID string, message usecase.StreamMessage) {
@@ -64,7 +65,7 @@ func (a *AgentActivities) SupervisorDecideStream(ctx context.Context, input Supe
 	})
 	// 2. 这里 Supervisor 主要是输出 JSON，通常不需要逐字流式展示给用户
 	// 直接复用原来的 CallSupervisor 即可
-	return a.agentUC.CallSupervisor(ctx, input.Query, input.History)
+	return a.agentUC.CallSupervisor(ctx, input.Query, input.UserID, input.History)
 }
 
 func (a *AgentActivities) WorkerRunStream(ctx context.Context, agentName, instruction, streamID string, userID string) (string, error) {
@@ -80,16 +81,17 @@ func (a *AgentActivities) WorkerRunStream(ctx context.Context, agentName, instru
 	}
 	if agentName == "Coder" {
 		// Coder 类似
-		return a.agentUC.RunCoder(ctx, instruction)
+		return a.agentUC.RunCoder(ctx, instruction, userID)
 	}
 	return "", fmt.Errorf("unknown agent")
 }
 
-func (a *AgentActivities) FinalReplyStream(ctx context.Context, history []domain.Message, streamID string) (string, error) {
+func (a *AgentActivities) FinalReplyStream(ctx context.Context, history []domain.Message, streamID string, userID string) (string, error) {
+	supervisorClient := a.agentUC.GetClientForAgent(ctx, userID, domain.AgentSupervisor)
 	tokenCallback := func(token string) {
 		a.publish(ctx, streamID, usecase.StreamMessage{Type: usecase.EventToken, Content: token})
 	}
-	return a.agentUC.StreamChat(ctx, history, tokenCallback)
+	return a.agentUC.StreamChat(ctx, history, tokenCallback, supervisorClient)
 }
 
 func (a *AgentActivities) LoadChatHistory(ctx context.Context, sessionID string) ([]domain.Message, error) {

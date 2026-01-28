@@ -24,6 +24,7 @@ services:
       - NEO4J_USER=neo4j
       - NEO4J_URI=bolt://neo4j:7687
       - JINA_API_KEY=jina_ac920b7e936841ac8767a686f2044d90LgFgN7JAhnFmpiHuLYX5XZIZJpkd
+      - API_KEY_MASTER_KEY=${API_KEY_MASTER_KEY}
     depends_on:
       postgres:
         condition: service_started

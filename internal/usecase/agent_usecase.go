@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-nexus/internal/domain"
+	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
 	"go-nexus/internal/usecase/tools"
@@ -18,9 +19,10 @@ import (
 
 // Reasoning + Acting 循环
 type AgentUseCase struct {
-	llm      gateway.LLMClient
-	ragUC    *RAGUseCase
-	chatRepo repo.ChatHistoryRepository
+	llmFactory *llm.LLMFactory
+	ragUC      *RAGUseCase
+	chatRepo   repo.ChatHistoryRepository
+	configRepo domain.ConfigRepository
 }
 
 type SupervisorDecision struct {
@@ -30,8 +32,8 @@ type SupervisorDecision struct {
 	FinalAnswer string `json:"final_answer"`
 }
 
-func NewAgentUseCase(llm gateway.LLMClient, ragUC *RAGUseCase, chatRepo repo.ChatHistoryRepository) *AgentUseCase {
-	return &AgentUseCase{llm: llm, ragUC: ragUC, chatRepo: chatRepo}
+func NewAgentUseCase(llmFactory *llm.LLMFactory, ragUC *RAGUseCase, chatRepo repo.ChatHistoryRepository, configRepo domain.ConfigRepository) *AgentUseCase {
+	return &AgentUseCase{llmFactory: llmFactory, ragUC: ragUC, chatRepo: chatRepo, configRepo: configRepo}
 }
 
 func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (string, error) {
@@ -58,7 +60,7 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 
 	fmt.Println("Agent: Thinking...")
 	_, spanLLM := tracer.Start(ctx, "LLM.Thinking")
-	resp, err := uc.llm.ChatWithTools(ctx, history, toolDefs)
+	resp, err := uc.GetClientForAgent(ctx, "", "").ChatWithTools(ctx, history, toolDefs)
 	spanLLM.End()
 	if err != nil {
 		return "", err
@@ -115,7 +117,7 @@ func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (st
 	}
 	fmt.Println("Agent: Summarizing result...")
 	_, spanFinal := tracer.Start(ctx, "LLM.Summarize")
-	finalAnswer, err := uc.llm.Chat(ctx, history)
+	finalAnswer, err := uc.GetClientForAgent(ctx, "", "").Chat(ctx, history)
 	spanFinal.End()
 	return finalAnswer, err
 }
@@ -143,7 +145,7 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 	for i := 0; i < maxSteps; i++ {
 		fmt.Printf("\n--- Step %d: Supervisor is thinking ---\n", i+1)
 		// make decision
-		decision, err := uc.CallSupervisor(ctx, userQuery, currentExecutionHistory)
+		decision, err := uc.CallSupervisor(ctx, userQuery, userID, currentExecutionHistory)
 		if err != nil {
 			return "", err
 		}
@@ -159,7 +161,7 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 		case "Researcher":
 			workResult, err = uc.RunResearcher(ctx, decision.Instruction, userID)
 		case "Coder":
-			workResult, err = uc.RunCoder(ctx, decision.Instruction)
+			workResult, err = uc.RunCoder(ctx, decision.Instruction, userID)
 		default:
 			return "", fmt.Errorf("unknown agent: %s", decision.NextAgent)
 		}
@@ -181,7 +183,7 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 	return finalAnswer, nil
 }
 
-func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, history []domain.Message) (*SupervisorDecision, error) {
+func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, userID string, history []domain.Message) (*SupervisorDecision, error) {
 	tmpl, _ := template.New("sys").Parse(PromptSupervisor)
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, map[string]string{"Query": query})
@@ -191,7 +193,8 @@ func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, histor
 	}
 	msgs = append(msgs, history...)
 	// supervisor 不使用tool
-	resp, err := uc.llm.Chat(ctx, msgs)
+	supervisorClient := uc.GetClientForAgent(ctx, userID, domain.AgentSupervisor)
+	resp, err := supervisorClient.Chat(ctx, msgs)
 	if err != nil {
 		return nil, err
 	}
@@ -207,14 +210,15 @@ func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, histor
 
 func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string, userID string) (string, error) {
 	fmt.Printf(" Researcher is searching and summarizing: %s\n", instruction)
-	answer, err := uc.ragUC.SearchAndChat(ctx, instruction, userID, PromptResearcher)
+	researcherClient := uc.GetClientForAgent(ctx, userID, domain.AgentResearcher)
+	answer, err := uc.ragUC.SearchAndChat(ctx, instruction, userID, researcherClient, PromptResearcher)
 	if err != nil {
 		return "", fmt.Errorf("researcher failed: %w", err)
 	}
 	return fmt.Sprintf("【研究员报告】:\n%s", answer), nil
 }
 
-func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (string, error) {
+func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string, userID string) (string, error) {
 	fmt.Printf("Coder is working on: %s\n", instruction)
 	toolsDefs := []gateway.ToolDefinition{
 		{
@@ -228,7 +232,8 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 		{Role: domain.RoleUser, Content: instruction},
 	}
 
-	resp, err := uc.llm.ChatWithTools(ctx, msgs, toolsDefs)
+	coderClient := uc.GetClientForAgent(ctx, userID, domain.AgentCoder)
+	resp, err := coderClient.ChatWithTools(ctx, msgs, toolsDefs)
 	if err != nil {
 		return "", err
 	}
@@ -255,8 +260,8 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string) (strin
 	return sb.String(), nil
 }
 
-func (uc *AgentUseCase) StreamChat(ctx context.Context, history []domain.Message, onToken func(string)) (string, error) {
-	return uc.llm.StreamChat(ctx, history, onToken)
+func (uc *AgentUseCase) StreamChat(ctx context.Context, history []domain.Message, onToken func(string), chatLLM gateway.LLMClient) (string, error) {
+	return chatLLM.StreamChat(ctx, history, onToken)
 }
 
 func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename string) error {
@@ -293,7 +298,8 @@ func (uc *AgentUseCase) GenerateMorningBrief(ctx context.Context, ticker, rawDat
 		{Role: domain.RoleSystem, Content: "你是一个金融主编。"},
 		{Role: domain.RoleUser, Content: buf.String()},
 	}
-	return uc.llm.Chat(ctx, history)
+	systemClient := uc.llmFactory.CreateClient(nil)
+	return systemClient.Chat(ctx, history)
 }
 
 func CleanJSONBlock(text string) string {
@@ -317,4 +323,17 @@ func extractGraphSafeContent(text string) string {
 	}
 	// 找不到标记就不存graph防止污染
 	return ""
+}
+
+func (uc *AgentUseCase) GetClientForAgent(ctx context.Context, userID string, agentType domain.AgentType) gateway.LLMClient {
+	userConfig, err := uc.configRepo.GetConfig(userID, agentType)
+	var llmCfg *gateway.LLMConfig
+	if err == nil && userConfig != nil {
+		llmCfg = &gateway.LLMConfig{
+			APIKey:    userConfig.APIKey,
+			BaseURL:   userConfig.BaseURL,
+			ModelName: userConfig.ModelName,
+		}
+	}
+	return uc.llmFactory.CreateClient(llmCfg)
 }

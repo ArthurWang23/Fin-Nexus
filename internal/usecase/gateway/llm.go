@@ -19,6 +19,13 @@ type ToolCall struct {
 	Args string
 }
 
+type LLMConfig struct {
+	APIKey         string
+	BaseURL        string
+	ModelName      string
+	EmbeddingModel string
+}
+
 // 封装模型响应
 type LLMResponse struct {
 	Content   string

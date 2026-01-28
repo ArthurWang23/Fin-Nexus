@@ -76,3 +76,20 @@ func (h *AgentHandler) GetSessionHistory(c *gin.Context) {
 	}
 	c.JSON(200, messages)
 }
+
+// CancelWorkflow 取消正在执行的工作流
+func (h *AgentHandler) CancelWorkflow(c *gin.Context) {
+	var req struct {
+		WorkflowID string `json:"workflow_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	err := h.tClient.CancelWorkflow(c.Request.Context(), req.WorkflowID, "")
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(200, gin.H{"message": "Workflow cancelled"})
+}

@@ -91,7 +91,10 @@ func (a *AgentActivities) FinalReplyStream(ctx context.Context, history []domain
 	tokenCallback := func(token string) {
 		a.publish(ctx, streamID, usecase.StreamMessage{Type: usecase.EventToken, Content: token})
 	}
-	return a.agentUC.StreamChat(ctx, history, tokenCallback, supervisorClient)
+	result, err := a.agentUC.StreamChat(ctx, history, tokenCallback, supervisorClient)
+	// 流式输出结束后，发送 done 消息通知前端
+	a.publish(ctx, streamID, usecase.StreamMessage{Type: usecase.EventDone, Content: "completed"})
+	return result, err
 }
 
 func (a *AgentActivities) LoadChatHistory(ctx context.Context, sessionID string) ([]domain.Message, error) {

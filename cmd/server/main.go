@@ -176,6 +176,7 @@ func main() {
 	{
 		protected.POST("/upload", uploadHandler.Upload)
 		protected.POST("/agent-approve", agentHandler.Approve)
+		protected.POST("/agent-cancel", agentHandler.CancelWorkflow)
 		protected.GET("/sessions", agentHandler.ListSessions)
 		protected.GET("/sessions/:id", agentHandler.GetSessionHistory)
 		protected.GET("/config", configHandler.GetModelConfigs)

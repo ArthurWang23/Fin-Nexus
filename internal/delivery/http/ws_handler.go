@@ -7,6 +7,7 @@ import (
 	"go-nexus/pkg/auth"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -19,6 +20,9 @@ import (
 var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true }, // 允许入市
 }
+
+// activeWorkflows 跟踪每个 session 当前活动的工作流 ID
+var activeWorkflows = sync.Map{} // sessionID -> workflowID
 
 type WSHandler struct {
 	rdb     *redis.Client
@@ -69,10 +73,29 @@ func (h *WSHandler) readPump(c *gin.Context, ws *websocket.Conn, sessionID strin
 		if err != nil {
 			// 连接断开 (正常关闭或异常)
 			log.Printf("WS Read Error: %v", err)
+			// 清理工作流跟踪
+			activeWorkflows.Delete(sessionID)
 			break
 		}
 		userQuery := string(message)
 		if userQuery == "" {
+			continue
+		}
+
+		// 处理取消指令
+		if userQuery == "CANCEL" {
+			if wfID, ok := activeWorkflows.Load(sessionID); ok {
+				err := h.tClient.CancelWorkflow(context.Background(), wfID.(string), "")
+				if err != nil {
+					log.Printf("Failed to cancel workflow: %v", err)
+				} else {
+					log.Printf("Workflow %s cancelled", wfID)
+					// 发送取消确认消息
+					cancelMsg := `{"type":"done","content":"Workflow cancelled by user"}`
+					h.rdb.Publish(context.Background(), "stream:"+sessionID, cancelMsg)
+				}
+				activeWorkflows.Delete(sessionID)
+			}
 			continue
 		}
 
@@ -83,10 +106,13 @@ func (h *WSHandler) readPump(c *gin.Context, ws *websocket.Conn, sessionID strin
 			ID:        workflowID,
 			TaskQueue: "agent-task-queue",
 		}
+		// 存储活动工作流 ID
+		activeWorkflows.Store(sessionID, workflowID)
 		// streamID 使用 sessionID 把消息推送到同一个 Redis
 		_, err = h.tClient.ExecuteWorkflow(context.Background(), options, workflow.StreamMultiAgentWorkflow, userQuery, sessionID, sessionID, userID)
 		if err != nil {
 			log.Printf("Failed to start workflow: %v", err)
+			activeWorkflows.Delete(sessionID)
 			continue
 		}
 	}

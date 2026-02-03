@@ -113,6 +113,20 @@ services:
     networks:
       - nexus_net
 
+#  orchestrator:
+#    build:
+#      context: ./orchestrator
+#      dockerfile: Dockerfile
+#    container_name: go_nexus_orchestrator
+#    environment:
+#      - TEMPORAL_CLI_ADDRESS=temporal:7233
+#      - TEMPORAL_TASK_QUEUE=graph-task-queue
+#    depends_on:
+#      temporal:
+#        condition: service_started
+#    networks:
+#      - nexus_net
+
 networks:
   nexus_net:
 

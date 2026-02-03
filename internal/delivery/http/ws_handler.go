@@ -2,7 +2,9 @@ package http
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"go-nexus/internal/usecase"
 	"go-nexus/internal/workflow"
 	"go-nexus/pkg/auth"
 	"log"
@@ -18,28 +20,34 @@ import (
 )
 
 var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true }, // 允许入市
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
 // activeWorkflows 跟踪每个 session 当前活动的工作流 ID
 var activeWorkflows = sync.Map{} // sessionID -> workflowID
 
+// WSMessage WebSocket 消息格式
+type WSMessage struct {
+	Type        string `json:"type"`                   // "chat" | "blueprint" | "cancel"
+	Content     string `json:"content,omitempty"`      // 用户消息内容
+	BlueprintID string `json:"blueprint_id,omitempty"` // Blueprint ID（可选）
+}
+
 type WSHandler struct {
-	rdb     *redis.Client
-	tClient client.Client
+	rdb         *redis.Client
+	tClient     client.Client
+	blueprintUC *usecase.BlueprintUseCase
 }
 
-func NewWSHandler(rdb *redis.Client, tClient client.Client) *WSHandler {
-	return &WSHandler{rdb: rdb, tClient: tClient}
+func NewWSHandler(rdb *redis.Client, tClient client.Client, blueprintUC *usecase.BlueprintUseCase) *WSHandler {
+	return &WSHandler{rdb: rdb, tClient: tClient, blueprintUC: blueprintUC}
 }
 
-// 全双工聊天
+// HandleWS 全双工聊天
 func (h *WSHandler) HandleWS(c *gin.Context) {
 	// 先检查 Token
 	tokenStr := c.Query("token")
 	if tokenStr == "" {
-		// 尝试从 Header 获取 (有些 WebSocket 客户端支持，如 Postman)
-		// 但浏览器原生不支持
 		tokenStr = c.GetHeader("Sec-WebSocket-Protocol")
 	}
 	if tokenStr == "" {
@@ -71,50 +79,132 @@ func (h *WSHandler) readPump(c *gin.Context, ws *websocket.Conn, sessionID strin
 	for {
 		_, message, err := ws.ReadMessage()
 		if err != nil {
-			// 连接断开 (正常关闭或异常)
 			log.Printf("WS Read Error: %v", err)
-			// 清理工作流跟踪
 			activeWorkflows.Delete(sessionID)
 			break
 		}
-		userQuery := string(message)
-		if userQuery == "" {
+
+		rawMessage := string(message)
+		if rawMessage == "" {
 			continue
 		}
 
-		// 处理取消指令
-		if userQuery == "CANCEL" {
-			if wfID, ok := activeWorkflows.Load(sessionID); ok {
-				err := h.tClient.CancelWorkflow(context.Background(), wfID.(string), "")
-				if err != nil {
-					log.Printf("Failed to cancel workflow: %v", err)
-				} else {
-					log.Printf("Workflow %s cancelled", wfID)
-					// 发送取消确认消息
-					cancelMsg := `{"type":"done","content":"Workflow cancelled by user"}`
-					h.rdb.Publish(context.Background(), "stream:"+sessionID, cancelMsg)
-				}
-				activeWorkflows.Delete(sessionID)
+		// 尝试解析为 JSON
+		var wsMsg WSMessage
+		if err := json.Unmarshal(message, &wsMsg); err != nil {
+			// 如果不是 JSON，当作纯文本处理（兼容旧版）
+			wsMsg = WSMessage{
+				Type:    "chat",
+				Content: rawMessage,
 			}
-			continue
 		}
 
-		// WorkflowID 必须唯一，否则 Temporal 会报错 "Already Started"。
-		// 每次对话都是一个新的 Run。
-		workflowID := fmt.Sprintf("chat-%s-%d", sessionID, time.Now().UnixNano())
-		options := client.StartWorkflowOptions{
-			ID:        workflowID,
-			TaskQueue: "agent-task-queue",
+		// 处理不同类型的消息
+		switch wsMsg.Type {
+		case "cancel", "CANCEL":
+			h.handleCancel(sessionID)
+
+		case "blueprint":
+			// 使用自定义 Blueprint 执行
+			h.handleBlueprintExecution(c.Request.Context(), sessionID, userID, wsMsg)
+
+		default:
+			// 默认使用原有的 Multi-Agent 工作流
+			h.handleDefaultChat(sessionID, userID, wsMsg.Content)
 		}
-		// 存储活动工作流 ID
-		activeWorkflows.Store(sessionID, workflowID)
-		// streamID 使用 sessionID 把消息推送到同一个 Redis
-		_, err = h.tClient.ExecuteWorkflow(context.Background(), options, workflow.StreamMultiAgentWorkflow, userQuery, sessionID, sessionID, userID)
+	}
+}
+
+// handleCancel 处理取消请求
+func (h *WSHandler) handleCancel(sessionID string) {
+	if wfID, ok := activeWorkflows.Load(sessionID); ok {
+		err := h.tClient.CancelWorkflow(context.Background(), wfID.(string), "")
 		if err != nil {
-			log.Printf("Failed to start workflow: %v", err)
-			activeWorkflows.Delete(sessionID)
-			continue
+			log.Printf("Failed to cancel workflow: %v", err)
+		} else {
+			log.Printf("Workflow %s cancelled", wfID)
+			cancelMsg := `{"type":"done","content":"Workflow cancelled by user"}`
+			h.rdb.Publish(context.Background(), "stream:"+sessionID, cancelMsg)
 		}
+		activeWorkflows.Delete(sessionID)
+	}
+}
+
+// handleDefaultChat 处理默认聊天（使用 StreamMultiAgentWorkflow）
+func (h *WSHandler) handleDefaultChat(sessionID, userID, userQuery string) {
+	if userQuery == "" {
+		return
+	}
+
+	// 兼容旧版纯文本 "CANCEL"
+	if userQuery == "CANCEL" {
+		h.handleCancel(sessionID)
+		return
+	}
+
+	workflowID := fmt.Sprintf("chat-%s-%d", sessionID, time.Now().UnixNano())
+	options := client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: "agent-task-queue",
+	}
+	activeWorkflows.Store(sessionID, workflowID)
+
+	_, err := h.tClient.ExecuteWorkflow(
+		context.Background(),
+		options,
+		workflow.StreamMultiAgentWorkflow,
+		userQuery,
+		sessionID,
+		sessionID,
+		userID,
+	)
+	if err != nil {
+		log.Printf("Failed to start workflow: %v", err)
+		activeWorkflows.Delete(sessionID)
+		errorMsg := fmt.Sprintf(`{"type":"error","content":"Failed to start workflow: %v"}`, err)
+		h.rdb.Publish(context.Background(), "stream:"+sessionID, errorMsg)
+	}
+}
+
+// handleBlueprintExecution 处理 Blueprint 执行
+func (h *WSHandler) handleBlueprintExecution(ctx context.Context, sessionID, userID string, wsMsg WSMessage) {
+	if wsMsg.BlueprintID == "" {
+		errorMsg := `{"type":"error","content":"blueprint_id is required"}`
+		h.rdb.Publish(ctx, "stream:"+sessionID, errorMsg)
+		return
+	}
+
+	// 获取 Blueprint（带解密配置）
+	bp, err := h.blueprintUC.GetForExecution(wsMsg.BlueprintID, userID)
+	if err != nil {
+		errorMsg := fmt.Sprintf(`{"type":"error","content":"Failed to get blueprint: %v"}`, err)
+		h.rdb.Publish(ctx, "stream:"+sessionID, errorMsg)
+		return
+	}
+
+	workflowID := fmt.Sprintf("graph-%s-%d", sessionID, time.Now().UnixNano())
+	options := client.StartWorkflowOptions{
+		ID:        workflowID,
+		TaskQueue: "graph-task-queue",
+	}
+	activeWorkflows.Store(sessionID, workflowID)
+
+	// 使用 TypeScript 的 GraphExecutionWorkflow
+	// 注意：这个工作流在 TS Worker 中定义
+	_, err = h.tClient.ExecuteWorkflow(
+		ctx,
+		options,
+		"GraphExecutionWorkflow", // TS 工作流名称
+		bp,                       // Blueprint 结构
+		wsMsg.Content,            // 用户输入
+		sessionID,                // streamId
+		userID,                   // userId
+	)
+	if err != nil {
+		log.Printf("Failed to start GraphExecutionWorkflow: %v", err)
+		activeWorkflows.Delete(sessionID)
+		errorMsg := fmt.Sprintf(`{"type":"error","content":"Failed to start workflow: %v"}`, err)
+		h.rdb.Publish(ctx, "stream:"+sessionID, errorMsg)
 	}
 }
 

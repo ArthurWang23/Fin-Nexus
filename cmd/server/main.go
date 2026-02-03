@@ -65,7 +65,16 @@ func main() {
 		dbHost, dbUser, dbPassword, dbName, dbPort)
 
 	db := database.NewPostgresDB(dsn)
-	err := db.AutoMigrate(&domain.User{}, &domain.ChatSession{}, domain.ChatMessage{}, &database.DocumentModel{}, &database.DocumentChunkModel{}, &domain.MorningBrief{}, &domain.UserModelConfig{})
+	err := db.AutoMigrate(
+		&domain.User{},
+		&domain.ChatSession{},
+		domain.ChatMessage{},
+		&database.DocumentModel{},
+		&database.DocumentChunkModel{},
+		&domain.MorningBrief{},
+		&domain.UserModelConfig{},
+		&domain.WorkflowBlueprint{}, // 新增 Blueprint 表
+	)
 	if err != nil {
 		log.Fatalf("failed to migrate db: %v", err)
 	}
@@ -113,9 +122,12 @@ func main() {
 		log.Printf("✅ API Key encryption enabled (master key loaded, %d bytes)", len(masterKey))
 	}
 	configRepo := persistence.NewConfigRepo(db, masterKey)
+	blueprintRepo := persistence.NewBlueprintRepo(db, masterKey) // 新增 Blueprint 仓库
 
 	agentService := usecase.NewAgentUseCase(llmFactory, ragService, chatRepo, configRepo)
+	blueprintUC := usecase.NewBlueprintUseCase(blueprintRepo) // 新增 Blueprint UseCase
 	uploadHandler := v1.NewUploadHandler(ingestService)
+	blueprintHandler := v1.NewBlueprintHandler(blueprintUC) // 新增 Blueprint Handler
 
 	temporalHost := os.Getenv("TEMPORAL_HOST")
 	if temporalHost == "" {
@@ -133,7 +145,8 @@ func main() {
 
 	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo, sessionRepo)
 	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
-	wsHandler := http.NewWSHandler(rdb, tClient)
+	dynamicActivities := activities.NewDynamicActivities(agentService, blueprintRepo, llmFactory, rdb) // 更新参数
+	wsHandler := http.NewWSHandler(rdb, tClient, blueprintUC)                                          // 新增 blueprintUC 参数
 
 	// 初始化 Python 工具（必须在 worker 启动前完成）
 	if err := tools.InitPythonTool(); err != nil {
@@ -152,6 +165,15 @@ func main() {
 	w.RegisterWorkflow(workflow.ScheduledDataIngestion)
 	w.RegisterActivity(agentActivities.LoadChatHistory)
 	w.RegisterActivity(agentActivities.SaveChatTurn)
+	w.RegisterActivity(dynamicActivities.DynamicLLMGenerate)
+	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateWithBlueprint)
+	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateStream)
+	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateWithNodeConfig)       // 节点级别配置
+	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateStreamWithNodeConfig) // 节点级别配置 + 流式
+	w.RegisterActivity(dynamicActivities.DynamicRouterDecide)
+	w.RegisterActivity(dynamicActivities.DynamicRouterDecideWithBlueprint)
+	w.RegisterActivity(dynamicActivities.DynamicRouterDecideWithNodeConfig) // 节点级别配置
+	w.RegisterActivity(agentActivities.PublishStreamEvent)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)
@@ -169,7 +191,8 @@ func main() {
 		public.POST("/login", authHandler.Login)
 		public.GET("/brief", briefHandler.GetBrief)
 		public.GET("/brief/version", briefHandler.GetBriefVersion)
-		public.GET("/models", configHandler.GetAvailableModels) // 公开模型列表
+		public.GET("/models", configHandler.GetAvailableModels)       // 公开模型列表
+		public.GET("/blueprints/public", blueprintHandler.ListPublic) // 公开 Blueprint 列表
 	}
 	protected := r.Group("/api/v1")
 	protected.Use(middleware.JWTAuth())
@@ -182,6 +205,15 @@ func main() {
 		protected.GET("/config", configHandler.GetModelConfigs)
 		protected.POST("/config", configHandler.UpdateModelConfig)
 		protected.DELETE("/config", configHandler.DeleteModelConfig)
+
+		// Blueprint CRUD API
+		protected.POST("/blueprints", blueprintHandler.Create)
+		protected.GET("/blueprints", blueprintHandler.List)
+		protected.GET("/blueprints/:id", blueprintHandler.Get)
+		protected.PUT("/blueprints/:id", blueprintHandler.Update)
+		protected.DELETE("/blueprints/:id", blueprintHandler.Delete)
+		protected.POST("/blueprints/:id/clone", blueprintHandler.Clone)
+		protected.POST("/blueprints/validate", blueprintHandler.Validate)
 	}
 	// websocket 不能传 header
 	public.GET("/ws/chat", wsHandler.HandleWS)

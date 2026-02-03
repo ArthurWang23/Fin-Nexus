@@ -51,11 +51,6 @@ func (a *AgentActivities) CoderRun(ctx context.Context, instruction string, user
 	return a.agentUC.RunCoder(ctx, instruction, userID)
 }
 
-func (a *AgentActivities) publish(ctx context.Context, streamID string, message usecase.StreamMessage) {
-	bytes, _ := json.Marshal(message)
-	a.rdb.Publish(ctx, "stream:"+streamID, bytes)
-}
-
 // SupervisorDecideStream 支持流式的决策 Activity
 func (a *AgentActivities) SupervisorDecideStream(ctx context.Context, input SupervisorInput, streamID string) (*usecase.SupervisorDecision, error) {
 	// 发送状态更新
@@ -151,9 +146,23 @@ func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput)
 	return nil
 }
 
+func (a *AgentActivities) PublishStreamEvent(ctx context.Context, streamID string, msgType string, content string) error {
+	msg := usecase.StreamMessage{
+		Type:    usecase.StreamEventType(msgType),
+		Content: content,
+	}
+	bytes, _ := json.Marshal(msg)
+	return a.rdb.Publish(ctx, "stream:"+streamID, bytes).Err()
+}
+
 func truncateString(s string, max int) string {
 	if len([]rune(s)) > max {
 		return string([]rune(s)[:max]) + "..."
 	}
 	return s
+}
+
+func (a *AgentActivities) publish(ctx context.Context, streamID string, message usecase.StreamMessage) {
+	bytes, _ := json.Marshal(message)
+	a.rdb.Publish(ctx, "stream:"+streamID, bytes)
 }

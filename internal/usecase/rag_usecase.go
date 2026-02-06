@@ -166,11 +166,19 @@ func (uc *RAGUseCase) SearchAndChat(ctx context.Context, query string, userID st
 参考资料:
 %s`, systemPrompt[0], contextBuilder.String())
 	} else {
-		finalSystemPrompt = fmt.Sprintf(`你是一个股票金融助手。请结合以下资料回答问题。
-优先基于【知识图谱信息】理清实体间的关系，再结合【文档片段】补充细节。
+		tmpl, err := template.New("graph_research").Parse(PromptGraphResearcher)
+		if err != nil {
+			return "", fmt.Errorf("parse prompt template error: %w", err)
+		}
 
-参考资料:
-%s`, contextBuilder.String())
+		var buf bytes.Buffer
+		err = tmpl.Execute(&buf, map[string]string{
+			"Context": contextBuilder.String(),
+		})
+		if err != nil {
+			return "", fmt.Errorf("execute prompt template error: %w", err)
+		}
+		finalSystemPrompt = buf.String()
 	}
 
 	history := []domain.Message{

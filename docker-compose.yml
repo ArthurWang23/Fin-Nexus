@@ -12,8 +12,8 @@ services:
       - DB_PASSWORD=nexus_password
       - DB_NAME=nexus_db
       - DB_PORT=5432
-      - LLM_API_KEY=sk-9073aeb278f44406bf6c8d0f24bd803e
-      - LLM_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1
+      - LLM_API_KEY=${LLM_API_KEY}
+      - LLM_BASE_URL=${LLM_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
       - LLM_MODEL=qwen3-max
       - LLM_EMBEDDING_MODEL=text-embedding-v4
       - SERVER_PORT=8080
@@ -23,8 +23,9 @@ services:
       - NEO4J_PASSWORD=nexus_password
       - NEO4J_USER=neo4j
       - NEO4J_URI=bolt://neo4j:7687
-      - JINA_API_KEY=jina_ac920b7e936841ac8767a686f2044d90LgFgN7JAhnFmpiHuLYX5XZIZJpkd
+      - JINA_API_KEY=${JINA_API_KEY}
       - API_KEY_MASTER_KEY=${API_KEY_MASTER_KEY}
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
     depends_on:
       postgres:
         condition: service_started
@@ -113,19 +114,19 @@ services:
     networks:
       - nexus_net
 
-#  orchestrator:
-#    build:
-#      context: ./orchestrator
-#      dockerfile: Dockerfile
-#    container_name: go_nexus_orchestrator
-#    environment:
-#      - TEMPORAL_CLI_ADDRESS=temporal:7233
-#      - TEMPORAL_TASK_QUEUE=graph-task-queue
-#    depends_on:
-#      temporal:
-#        condition: service_started
-#    networks:
-#      - nexus_net
+  orchestrator:
+    build:
+      context: ./orchestrator
+      dockerfile: Dockerfile
+    container_name: go_nexus_orchestrator
+    environment:
+      - TEMPORAL_CLI_ADDRESS=temporal:7233
+      - TEMPORAL_TASK_QUEUE=graph-task-queue
+    depends_on:
+      temporal:
+        condition: service_started
+    networks:
+      - nexus_net
 
 networks:
   nexus_net:

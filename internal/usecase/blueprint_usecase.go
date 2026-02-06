@@ -226,13 +226,13 @@ func (uc *BlueprintUseCase) Validate(bp *domain.WorkflowBlueprint) *domain.Bluep
 		})
 	}
 
-	// 8. 检测循环（简单检测）
-	if uc.hasCycle(bp) {
-		errors = append(errors, domain.ValidationError{
-			Field:   "edges",
-			Message: "cycle detected in workflow graph",
-		})
-	}
+	// 8. 检测循环（已移除，Execution Engine 支持 maxSteps 限制，允许循环）
+	// if uc.hasCycle(bp) {
+	// 	errors = append(errors, domain.ValidationError{
+	// 		Field:   "edges",
+	// 		Message: "cycle detected in workflow graph",
+	// 	})
+	// }
 
 	if len(errors) > 0 {
 		result.Valid = false

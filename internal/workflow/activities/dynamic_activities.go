@@ -8,8 +8,11 @@ import (
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/usecase"
 	"go-nexus/internal/usecase/gateway"
+	"go-nexus/internal/usecase/repo"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -19,6 +22,8 @@ type DynamicActivities struct {
 	blueprintRepo domain.BlueprintRepository
 	llmFactory    *llm.LLMFactory
 	rdb           *redis.Client
+	chatRepo      repo.ChatHistoryRepository // Redis 聊天历史
+	sessionRepo   domain.SessionRepository   // PostgreSQL 会话
 }
 
 // NewDynamicActivities 创建 DynamicActivities
@@ -27,12 +32,16 @@ func NewDynamicActivities(
 	blueprintRepo domain.BlueprintRepository,
 	llmFactory *llm.LLMFactory,
 	rdb *redis.Client,
+	chatRepo repo.ChatHistoryRepository,
+	sessionRepo domain.SessionRepository,
 ) *DynamicActivities {
 	return &DynamicActivities{
 		agentUC:       agentUC,
 		blueprintRepo: blueprintRepo,
 		llmFactory:    llmFactory,
 		rdb:           rdb,
+		chatRepo:      chatRepo,
+		sessionRepo:   sessionRepo,
 	}
 }
 
@@ -51,75 +60,6 @@ type DynamicLLMGenerateInput struct {
 	ModelName    string `json:"model_name"`
 	UserID       string `json:"user_id"`
 	BlueprintID  string `json:"blueprint_id,omitempty"` // 可选，如果提供则使用 Blueprint 的配置
-}
-
-// DynamicLLMGenerate 通用 LLM 生成（支持 Blueprint 配置）
-func (a *DynamicActivities) DynamicLLMGenerate(
-	ctx context.Context,
-	systemPrompt string,
-	userPrompt string,
-	modelName string,
-	userId string,
-) (string, error) {
-	// 使用用户配置或默认配置
-	client := a.agentUC.GetClientForAgent(ctx, userId, domain.AgentDynamic)
-	msgs := []domain.Message{
-		{Role: domain.RoleSystem, Content: systemPrompt},
-		{Role: domain.RoleUser, Content: userPrompt},
-	}
-	return client.Chat(ctx, msgs)
-}
-
-// DynamicLLMGenerateWithBlueprint 使用 Blueprint 配置的 LLM 生成
-func (a *DynamicActivities) DynamicLLMGenerateWithBlueprint(
-	ctx context.Context,
-	blueprintID string,
-	systemPrompt string,
-	userPrompt string,
-	userId string,
-) (string, error) {
-	client, err := a.getClientFromBlueprint(ctx, blueprintID, userId)
-	if err != nil {
-		return "", fmt.Errorf("failed to get LLM client: %w", err)
-	}
-
-	msgs := []domain.Message{
-		{Role: domain.RoleSystem, Content: systemPrompt},
-		{Role: domain.RoleUser, Content: userPrompt},
-	}
-	return client.Chat(ctx, msgs)
-}
-
-// DynamicLLMGenerateStream 流式 LLM 生成（支持 Blueprint 配置）
-func (a *DynamicActivities) DynamicLLMGenerateStream(
-	ctx context.Context,
-	blueprintID string,
-	systemPrompt string,
-	userPrompt string,
-	streamID string,
-	userId string,
-) (string, error) {
-	client, err := a.getClientFromBlueprint(ctx, blueprintID, userId)
-	if err != nil {
-		return "", fmt.Errorf("failed to get LLM client: %w", err)
-	}
-
-	msgs := []domain.Message{
-		{Role: domain.RoleSystem, Content: systemPrompt},
-		{Role: domain.RoleUser, Content: userPrompt},
-	}
-
-	// 流式回调
-	tokenCallback := func(token string) {
-		a.publishStreamEvent(ctx, streamID, "token", token)
-	}
-
-	result, err := client.StreamChat(ctx, msgs, tokenCallback)
-	if err != nil {
-		return "", err
-	}
-
-	return result, nil
 }
 
 // DynamicLLMGenerateWithNodeConfig 使用节点级别配置的 LLM 生成
@@ -142,6 +82,7 @@ func (a *DynamicActivities) DynamicLLMGenerateWithNodeConfig(
 }
 
 // DynamicLLMGenerateStreamWithNodeConfig 使用节点级别配置的流式 LLM 生成
+// msgType: 消息类型，"token" 用于正常聊天，"agent_output" 用于 Blueprint 内部节点
 func (a *DynamicActivities) DynamicLLMGenerateStreamWithNodeConfig(
 	ctx context.Context,
 	nodeConfig *NodeLLMConfigInput, // 节点级别配置（可为 nil）
@@ -149,6 +90,7 @@ func (a *DynamicActivities) DynamicLLMGenerateStreamWithNodeConfig(
 	systemPrompt string,
 	userPrompt string,
 	streamID string,
+	msgType string,
 	userId string,
 ) (string, error) {
 	client := a.getClientWithFallback(ctx, nodeConfig, blueprintID, userId)
@@ -158,8 +100,14 @@ func (a *DynamicActivities) DynamicLLMGenerateStreamWithNodeConfig(
 		{Role: domain.RoleUser, Content: userPrompt},
 	}
 
+	// 使用指定的消息类型发布流式事件
+	eventType := msgType
+	if eventType == "" {
+		eventType = "token"
+	}
+
 	tokenCallback := func(token string) {
-		a.publishStreamEvent(ctx, streamID, "token", token)
+		a.PublishStreamEvent(ctx, streamID, eventType, token)
 	}
 
 	result, err := client.StreamChat(ctx, msgs, tokenCallback)
@@ -230,95 +178,101 @@ func (a *DynamicActivities) getClientWithFallback(
 		}
 	}
 
-	// 3. 回退到用户默认配置
-	return a.agentUC.GetClientForAgent(ctx, userId, domain.AgentDynamic)
+	// 3. 回退到系统默认配置 (直接使用 Factory 默认值，不查库)
+	return a.llmFactory.CreateClient(nil)
 }
 
-// DynamicRouterDecide 路由决策
-func (a *DynamicActivities) DynamicRouterDecide(
-	ctx context.Context,
-	prompt string,
-	choices []string,
-	input string,
-) (string, error) {
-	client := a.agentUC.GetClientForAgent(ctx, "", domain.AgentSupervisor)
-	fullPrompt := fmt.Sprintf("%s\nContext: %s\nOptions: %v\nAnswer with the option key only.", prompt, input, choices)
-	msgs := []domain.Message{
-		{Role: domain.RoleUser, Content: fullPrompt},
-	}
-	resp, err := client.Chat(ctx, msgs)
-	if err != nil {
-		return "", err
-	}
-	clean := strings.TrimSpace(resp)
-	clean = strings.ToLower(clean)
-	return clean, nil
-}
-
-// DynamicRouterDecideWithBlueprint 使用 Blueprint 配置的路由决策
-func (a *DynamicActivities) DynamicRouterDecideWithBlueprint(
-	ctx context.Context,
-	blueprintID string,
-	prompt string,
-	choices []string,
-	input string,
-	userId string,
-) (string, error) {
-	client, err := a.getClientFromBlueprint(ctx, blueprintID, userId)
-	if err != nil {
-		return "", fmt.Errorf("failed to get LLM client: %w", err)
-	}
-
-	fullPrompt := fmt.Sprintf("%s\nContext: %s\nOptions: %v\nAnswer with the option key only.", prompt, input, choices)
-	msgs := []domain.Message{
-		{Role: domain.RoleUser, Content: fullPrompt},
-	}
-	resp, err := client.Chat(ctx, msgs)
-	if err != nil {
-		return "", err
-	}
-	clean := strings.TrimSpace(resp)
-	clean = strings.ToLower(clean)
-	return clean, nil
-}
-
-// getClientFromBlueprint 从 Blueprint 获取 LLM 客户端
-func (a *DynamicActivities) getClientFromBlueprint(ctx context.Context, blueprintID string, userId string) (gateway.LLMClient, error) {
-	// 如果没有 Blueprint ID，使用用户默认配置
-	if blueprintID == "" {
-		return a.agentUC.GetClientForAgent(ctx, userId, domain.AgentDynamic), nil
-	}
-
-	// 获取 Blueprint（带解密）
-	bp, err := a.blueprintRepo.GetByIDWithDecryption(blueprintID)
-	if err != nil {
-		// 如果获取失败，回退到用户默认配置
-		return a.agentUC.GetClientForAgent(ctx, userId, domain.AgentDynamic), nil
-	}
-
-	// 如果 Blueprint 没有配置 API Key，使用用户默认配置
-	if bp.LLMConfig.APIKey == "" {
-		return a.agentUC.GetClientForAgent(ctx, userId, domain.AgentDynamic), nil
-	}
-
-	// 使用 Blueprint 的配置创建客户端
-	llmCfg := &gateway.LLMConfig{
-		APIKey:    bp.LLMConfig.APIKey,
-		BaseURL:   bp.LLMConfig.BaseURL,
-		ModelName: bp.LLMConfig.ModelName,
-	}
-	return a.llmFactory.CreateClient(llmCfg), nil
-}
-
-// publishStreamEvent 发布流式事件到 Redis
-func (a *DynamicActivities) publishStreamEvent(ctx context.Context, streamID string, msgType string, content string) {
+// PublishStreamEvent 发布流式事件到 Redis (Activity)
+func (a *DynamicActivities) PublishStreamEvent(ctx context.Context, streamID string, msgType string, content string) error {
 	if a.rdb == nil || streamID == "" {
-		return
+		return nil
 	}
 	msg := usecase.StreamMessage{
 		Type:    usecase.StreamEventType(msgType),
 		Content: content,
 	}
 	bytes, _ := json.Marshal(msg)
-	a.rdb.Publish(ctx, "stream:"+streamID, bytes)
+	return a.rdb.Publish(ctx, "stream:"+streamID, bytes).Err()
+}
+
+// ResearcherSearch 执行搜索工具
+func (a *DynamicActivities) ResearcherSearch(ctx context.Context, instruction string, userId string) (string, error) {
+	// 复用 AgentUseCase 中的 RunResearcher 逻辑 (包含 RAG + WebSearch + Summarize)
+	return a.agentUC.RunResearcher(ctx, instruction, userId)
+}
+
+// CoderRun 执行代码工具
+func (a *DynamicActivities) CoderRun(ctx context.Context, instruction string, userId string) (string, error) {
+	// 复用 AgentUseCase 中的 RunCoder 逻辑
+	return a.agentUC.RunCoder(ctx, instruction, userId)
+}
+
+// SaveBlueprintChatTurn 保存 Blueprint 工作流的对话记录
+// 同时存入 Redis（LLM 上下文）和 PostgreSQL（历史记录）
+func (a *DynamicActivities) SaveBlueprintChatTurn(ctx context.Context, sessionID, userID, userQuery, finalAnswer string) error {
+	if sessionID == "" {
+		return nil
+	}
+
+	// 1. 保存到 Redis（用于 LLM 上下文）
+	if a.chatRepo != nil {
+		if err := a.chatRepo.AddMessage(ctx, sessionID, domain.Message{
+			Role:    domain.RoleUser,
+			Content: userQuery,
+		}); err != nil {
+			return err
+		}
+		if err := a.chatRepo.AddMessage(ctx, sessionID, domain.Message{
+			Role:    domain.RoleAssistant,
+			Content: finalAnswer,
+		}); err != nil {
+			return err
+		}
+	}
+
+	// 2. 检查并创建 PostgreSQL Session
+	if a.sessionRepo != nil {
+		_, err := a.sessionRepo.GetSessionByID(sessionID)
+		if err != nil {
+			// 会话不存在，创建新会话
+			newSession := &domain.ChatSession{
+				ID:        sessionID,
+				UserID:    userID,
+				Title:     truncateBlueprintTitle(userQuery, 20),
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
+			}
+			if err := a.sessionRepo.CreateSession(newSession); err != nil {
+				return fmt.Errorf("failed to create session: %w", err)
+			}
+		}
+
+		// 3. 保存消息到 PostgreSQL
+		userMsg := &domain.ChatMessage{
+			ID:        uuid.New().String(),
+			SessionID: sessionID,
+			Role:      "user",
+			Content:   userQuery,
+			CreatedAt: time.Now(),
+		}
+		a.sessionRepo.SaveMessage(userMsg)
+
+		aiMsg := &domain.ChatMessage{
+			ID:        uuid.New().String(),
+			SessionID: sessionID,
+			Role:      "assistant",
+			Content:   finalAnswer,
+			CreatedAt: time.Now().Add(time.Second),
+		}
+		a.sessionRepo.SaveMessage(aiMsg)
+	}
+
+	return nil
+}
+
+func truncateBlueprintTitle(s string, max int) string {
+	if len([]rune(s)) > max {
+		return string([]rune(s)[:max]) + "..."
+	}
+	return s
 }

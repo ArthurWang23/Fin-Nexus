@@ -1,3 +1,13 @@
-go.mod
-go.sum
+# Environment files (contain API keys)
+.env
+
+# Dependencies
 /orchestrator/node_modules/
+
+# IDE
+.idea/
+.vscode/
+
+# Build outputs
+/server
+*.exe

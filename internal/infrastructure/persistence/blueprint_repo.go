@@ -11,6 +11,9 @@ import (
 	"gorm.io/gorm"
 )
 
+// 掩盖 API Key
+const APIKeyMask = "••••••••"
+
 // PostgresBlueprintRepo Blueprint 仓库实现
 type PostgresBlueprintRepo struct {
 	db        *gorm.DB
@@ -45,7 +48,18 @@ func (r *PostgresBlueprintRepo) Update(bp *domain.WorkflowBlueprint) error {
 	bp.UpdatedAt = time.Now()
 	bp.Version++
 
-	// 加密 API Key
+	// 获取原有 Blueprint 以保留 API Key（如果没有新值）
+	var existing domain.WorkflowBlueprint
+	if err := r.db.Where("id = ?", bp.ID).First(&existing).Error; err == nil {
+		// 保留 Blueprint 级别的 API Key（如果新值为空或掩码）
+		if bp.LLMConfig.APIKey == "" || bp.LLMConfig.APIKey == APIKeyMask {
+			bp.LLMConfig.APIKey = existing.LLMConfig.APIKey // 保留原有加密值
+		}
+		// 保留节点级别的 API Key
+		r.preserveNodeAPIKeys(bp, &existing)
+	}
+
+	// 加密 API Key（仅加密新值）
 	bpToSave := *bp
 	if err := r.encryptLLMConfig(&bpToSave); err != nil {
 		return fmt.Errorf("failed to encrypt llm config: %w", err)
@@ -70,8 +84,10 @@ func (r *PostgresBlueprintRepo) GetByID(id string) (*domain.WorkflowBlueprint, e
 	if err != nil {
 		return nil, err
 	}
-	// 清空所有 API Key，不返回给前端
-	bp.LLMConfig.APIKey = ""
+	// 使用掩码替代 API Key，不返回实际值给前端
+	if bp.LLMConfig.APIKey != "" {
+		bp.LLMConfig.APIKey = APIKeyMask
+	}
 	r.clearNodeAPIKeys(&bp)
 	return &bp, nil
 }
@@ -102,7 +118,9 @@ func (r *PostgresBlueprintRepo) ListByUser(userID string) ([]domain.WorkflowBlue
 
 	// 清空所有 API Key
 	for i := range blueprints {
-		blueprints[i].LLMConfig.APIKey = ""
+		if blueprints[i].LLMConfig.APIKey != "" {
+			blueprints[i].LLMConfig.APIKey = APIKeyMask
+		}
 		r.clearNodeAPIKeys(&blueprints[i])
 	}
 
@@ -119,7 +137,9 @@ func (r *PostgresBlueprintRepo) ListPublic() ([]domain.WorkflowBlueprint, error)
 
 	// 清空所有 API Key
 	for i := range blueprints {
-		blueprints[i].LLMConfig.APIKey = ""
+		if blueprints[i].LLMConfig.APIKey != "" {
+			blueprints[i].LLMConfig.APIKey = APIKeyMask
+		}
 		r.clearNodeAPIKeys(&blueprints[i])
 	}
 
@@ -193,8 +213,8 @@ func (r *PostgresBlueprintRepo) encryptNodeConfig(node *domain.GraphNode) error 
 		return fmt.Errorf("failed to unmarshal node config: %w", err)
 	}
 
-	// 如果有节点级别的 API Key，加密它
-	if llmConfig.LLMConfig != nil && llmConfig.LLMConfig.APIKey != "" {
+	// 如果有节点级别的 API Key 且不是掩码值，加密它
+	if llmConfig.LLMConfig != nil && llmConfig.LLMConfig.APIKey != "" && llmConfig.LLMConfig.APIKey != APIKeyMask {
 		encrypted, err := crypto.Encrypt(llmConfig.LLMConfig.APIKey, r.masterKey)
 		if err != nil {
 			return err
@@ -246,9 +266,59 @@ func (r *PostgresBlueprintRepo) clearNodeAPIKeys(bp *domain.WorkflowBlueprint) {
 				continue
 			}
 
-			if llmConfig.LLMConfig != nil {
-				llmConfig.LLMConfig.APIKey = ""
+			if llmConfig.LLMConfig != nil && llmConfig.LLMConfig.APIKey != "" {
+				llmConfig.LLMConfig.APIKey = APIKeyMask // 使用掩码值而非空字符串
 				bp.Nodes[i].Config = llmConfig
+			}
+		}
+	}
+}
+
+// preserveNodeAPIKeys 保留节点的 API Key（如果新值为空或掩码）
+func (r *PostgresBlueprintRepo) preserveNodeAPIKeys(bp *domain.WorkflowBlueprint, existing *domain.WorkflowBlueprint) {
+	// 创建现有节点的映射
+	existingNodeMap := make(map[string]*domain.GraphNode)
+	for i := range existing.Nodes {
+		existingNodeMap[existing.Nodes[i].ID] = &existing.Nodes[i]
+	}
+
+	for i := range bp.Nodes {
+		if bp.Nodes[i].Type != domain.NodeTypeLLM {
+			continue
+		}
+
+		// 获取新节点的配置
+		configBytes, err := json.Marshal(bp.Nodes[i].Config)
+		if err != nil {
+			continue
+		}
+
+		var newConfig domain.LLMNodeConfig
+		if err := json.Unmarshal(configBytes, &newConfig); err != nil {
+			continue
+		}
+
+		// 如果新 API Key 为空或掩码，尝试保留原有值
+		if newConfig.LLMConfig != nil && (newConfig.LLMConfig.APIKey == "" || newConfig.LLMConfig.APIKey == APIKeyMask) {
+			existingNode, exists := existingNodeMap[bp.Nodes[i].ID]
+			if !exists {
+				continue
+			}
+
+			existingBytes, err := json.Marshal(existingNode.Config)
+			if err != nil {
+				continue
+			}
+
+			var existingConfig domain.LLMNodeConfig
+			if err := json.Unmarshal(existingBytes, &existingConfig); err != nil {
+				continue
+			}
+
+			// 复制原有加密的 API Key
+			if existingConfig.LLMConfig != nil && existingConfig.LLMConfig.APIKey != "" {
+				newConfig.LLMConfig.APIKey = existingConfig.LLMConfig.APIKey
+				bp.Nodes[i].Config = newConfig
 			}
 		}
 	}

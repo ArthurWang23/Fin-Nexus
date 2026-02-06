@@ -22,31 +22,6 @@ interface NodeLLMConfigInput {
 }
 
 interface GoActivities {
-    // 基础 LLM 生成（使用用户默认配置）
-    DynamicLLMGenerate(
-        systemPrompt: string,
-        userPrompt: string,
-        modelName: string,
-        userId: string
-    ): Promise<string>;
-
-    // 使用 Blueprint 配置的 LLM 生成
-    DynamicLLMGenerateWithBlueprint(
-        blueprintId: string,
-        systemPrompt: string,
-        userPrompt: string,
-        userId: string
-    ): Promise<string>;
-
-    // 流式 LLM 生成
-    DynamicLLMGenerateStream(
-        blueprintId: string,
-        systemPrompt: string,
-        userPrompt: string,
-        streamId: string,
-        userId: string
-    ): Promise<string>;
-
     // 使用节点级别配置的 LLM 生成（新增）
     DynamicLLMGenerateWithNodeConfig(
         nodeConfig: NodeLLMConfigInput | null,
@@ -63,24 +38,11 @@ interface GoActivities {
         systemPrompt: string,
         userPrompt: string,
         streamId: string,
+        msgType: string,  // 消息类型: "token" (正常) 或 "agent_output" (内部节点)
         userId: string
     ): Promise<string>;
 
     // 路由决策
-    DynamicRouterDecide(
-        prompt: string,
-        choices: string[],
-        input: string
-    ): Promise<string>;
-
-    // 使用 Blueprint 配置的路由决策
-    DynamicRouterDecideWithBlueprint(
-        blueprintId: string,
-        prompt: string,
-        choices: string[],
-        input: string,
-        userId: string
-    ): Promise<string>;
 
     // 使用节点级别配置的路由决策（新增）
     DynamicRouterDecideWithNodeConfig(
@@ -98,6 +60,14 @@ interface GoActivities {
 
     // 流式事件发布
     PublishStreamEvent(sessionId: string, msgType: string, content: string): Promise<void>;
+
+    // 会话保存
+    SaveBlueprintChatTurn(
+        sessionId: string,
+        userId: string,
+        userQuery: string,
+        finalAnswer: string
+    ): Promise<void>;
 }
 
 // 代理 Go Activities
@@ -132,9 +102,10 @@ export async function GraphExecutionWorkflow(
     blueprint: WorkflowBlueprint,
     initialInput: string,
     streamId: string,
+    sessionId: string,
     userId: string
 ): Promise<string> {
-    log.info(`[GraphEngine] Started. User: ${userId}, Blueprint: ${blueprint.id}`);
+    log.info(`[GraphEngine] Started. User: ${userId}, Blueprint: ${blueprint.id}, SessionId: ${sessionId}`);
 
     // 初始化执行状态
     const state: ExecutionState = {
@@ -177,6 +148,14 @@ export async function GraphExecutionWorkflow(
                     // 转换节点配置为 Go 格式
                     const nodeConfig = convertNodeConfig(cfg.llm_config);
 
+                    // 判断是否为最终输出节点（连接到 End 节点的 LLM 节点）
+                    // 最终输出使用 "token" 类型，内部节点使用 "agent_output" 类型
+                    const isConnectedToEnd = blueprint.edges.some(
+                        e => e.source === node.id &&
+                            blueprint.nodes.find(n => n.id === e.target)?.type === 'End'
+                    );
+                    const msgType = isConnectedToEnd ? 'token' : 'agent_output';
+
                     // 检查是否启用流式输出
                     if (cfg.streaming) {
                         output = await activities.DynamicLLMGenerateStreamWithNodeConfig(
@@ -185,6 +164,7 @@ export async function GraphExecutionWorkflow(
                             cfg.system_prompt || '',
                             prompt,
                             streamId,
+                            msgType,
                             userId
                         );
                     } else {
@@ -197,8 +177,9 @@ export async function GraphExecutionWorkflow(
                             userId
                         );
                         // 非流式模式下，也发布输出内容以便前端展示
-                        await activities.PublishStreamEvent(streamId, 'token', output);
+                        await activities.PublishStreamEvent(streamId, msgType, output);
                     }
+                    log.info(`[GraphEngine] LLM node ${node.id} output length: ${output.length}, msgType: ${msgType}`);
                     break;
                 }
 
@@ -224,8 +205,8 @@ export async function GraphExecutionWorkflow(
                         default:
                             output = `Error: Unknown tool '${cfg.tool_name}'`;
                     }
-                    // 发布工具输出
-                    await activities.PublishStreamEvent(streamId, 'token', `\n[Tool Output]\n${output}\n`);
+                    // 发布工具输出（使用 agent_output 显示在可折叠区块）
+                    await activities.PublishStreamEvent(streamId, 'agent_output', `[Tool: ${cfg.tool_name}]\n${output}`);
                     break;
                 }
 
@@ -259,6 +240,15 @@ export async function GraphExecutionWorkflow(
                 }
 
                 case 'End':
+                    // 保存会话
+                    if (sessionId) {
+                        await activities.SaveBlueprintChatTurn(
+                            sessionId,
+                            userId,
+                            initialInput,
+                            state["last_output"]
+                        );
+                    }
                     await activities.PublishStreamEvent(streamId, 'done', 'completed');
                     return state["last_output"];
             }
@@ -275,8 +265,20 @@ export async function GraphExecutionWorkflow(
         state["last_output"] = output;
 
         // 导航到下一个节点
+        const prevNodeId = currentNodeId;
         currentNodeId = findNextNode(blueprint, node, nextCondition);
+        log.info(`[GraphEngine] Navigation: ${prevNodeId} -> ${currentNodeId} (condition: ${nextCondition})`);
         stepsCount++;
+    }
+
+    // 保存会话（工作流通过主循环退出时）
+    if (sessionId) {
+        await activities.SaveBlueprintChatTurn(
+            sessionId,
+            userId,
+            initialInput,
+            state["last_output"]
+        );
     }
 
     // 发送完成事件
@@ -285,6 +287,7 @@ export async function GraphExecutionWorkflow(
     if (stepsCount >= maxSteps) {
         log.warn(`[GraphEngine] Max steps reached (${maxSteps}), workflow terminated`);
     }
+
 
     return state["last_output"];
 }
@@ -327,7 +330,35 @@ function fillTemplate(template: string, state: ExecutionState): string {
             return String(state[trimmedKey]);
         }
 
-        // 2. 如果未找到，返回原字符串 (或者可以配置为返回空字符串)
+        // 2. 尝试解析 JSON 属性 (例如: supervisor.output.instruction)
+        // 假设 keys 形如 "nodeId.output.propertyName"
+        // 我们尝试找到最长匹配的 state key (如 "nodeId.output")
+        // 然后解析其值为 JSON 并获取剩余 path (propertyName)
+        const parts = trimmedKey.split('.');
+        // 尝试从长到短匹配 state key
+        for (let i = parts.length - 1; i >= 1; i--) {
+            const stateKey = parts.slice(0, i).join('.');
+            const propPath = parts.slice(i); // 剩余部分
+
+            if (Object.prototype.hasOwnProperty.call(state, stateKey)) {
+                const jsonStr = state[stateKey];
+                try {
+                    let obj = JSON.parse(jsonStr);
+                    // 逐层访问属性
+                    for (const prop of propPath) {
+                        obj = obj[prop];
+                        if (obj === undefined) break;
+                    }
+                    if (obj !== undefined && typeof obj !== 'object') {
+                        return String(obj);
+                    }
+                } catch (e) {
+                    // 解析失败或不是 JSON，继续
+                }
+            }
+        }
+
+        // 3. 如果未找到，返回原字符串 (或者可以配置为返回空字符串)
         return match;
     });
 }
@@ -344,23 +375,32 @@ function findNextNode(
     currentNode: GraphNode,
     condition: string
 ): string | undefined {
-    // 查找匹配条件的边
+    const conditionLower = condition.toLowerCase();
+    log.info(`[findNextNode] Node: ${currentNode.id}, Condition: "${condition}", Total edges: ${blueprint.edges.length}`);
+
+    // 查找匹配条件的边（大小写不敏感）
     const matchedEdge = blueprint.edges.find(
-        e => e.source === currentNode.id && e.condition === condition
+        e => e.source === currentNode.id && e.condition?.toLowerCase() === conditionLower
     );
     if (matchedEdge) {
+        log.info(`[findNextNode] Found matched edge: ${matchedEdge.source} -> ${matchedEdge.target} (condition: ${matchedEdge.condition})`);
         return matchedEdge.target;
     }
 
-    // 查找默认边
+    // 查找默认边（包括 'default'、'next' 或无条件）
+    const isDefaultCondition = (c: string | undefined) =>
+        !c || ['default', 'next'].includes(c.toLowerCase());
+
     const defaultEdge = blueprint.edges.find(
-        e => e.source === currentNode.id && (!e.condition || e.condition === 'default')
+        e => e.source === currentNode.id && isDefaultCondition(e.condition)
     );
     if (defaultEdge) {
+        log.info(`[findNextNode] Found default edge: ${defaultEdge.source} -> ${defaultEdge.target}`);
         return defaultEdge.target;
     }
 
     // 回退到节点的 next 字段
+    log.info(`[findNextNode] No edge found, using node.next: ${currentNode.next}`);
     return currentNode.next;
 }
 

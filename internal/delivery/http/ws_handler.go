@@ -198,6 +198,7 @@ func (h *WSHandler) handleBlueprintExecution(ctx context.Context, sessionID, use
 		bp,                       // Blueprint 结构
 		wsMsg.Content,            // 用户输入
 		sessionID,                // streamId
+		sessionID,                // sessionId（用于保存会话）
 		userID,                   // userId
 	)
 	if err != nil {

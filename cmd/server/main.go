@@ -10,6 +10,7 @@ import (
 	"go-nexus/internal/infrastructure/graph"
 	"go-nexus/internal/infrastructure/llm"
 	"go-nexus/internal/infrastructure/persistence"
+	"go-nexus/internal/infrastructure/search"
 	"go-nexus/internal/usecase"
 	"go-nexus/internal/usecase/tools"
 	"go-nexus/internal/workflow"
@@ -116,19 +117,20 @@ func main() {
 	// 获取 API Key 加密主密钥
 	masterKey, err := crypto.GetMasterKey()
 	if err != nil {
-		log.Printf("⚠️  Warning: %v - API keys will NOT be encrypted", err)
+		log.Printf(" Warning: %v - API keys will NOT be encrypted", err)
 		masterKey = nil // 开发环境可允许不加密，生产环境应强制要求
 	} else {
-		log.Printf("✅ API Key encryption enabled (master key loaded, %d bytes)", len(masterKey))
+		log.Printf(" API Key encryption enabled (master key loaded, %d bytes)", len(masterKey))
 	}
 	configRepo := persistence.NewConfigRepo(db, masterKey)
 	blueprintRepo := persistence.NewBlueprintRepo(db, masterKey) // 新增 Blueprint 仓库
 
-	agentService := usecase.NewAgentUseCase(llmFactory, ragService, chatRepo, configRepo)
+	tavily_key := os.Getenv("TAVILY_API_KEY")
+	tavilyClient := search.NewTavilyClient(tavily_key)
+	agentService := usecase.NewAgentUseCase(llmFactory, ragService, chatRepo, configRepo, tavilyClient)
 	blueprintUC := usecase.NewBlueprintUseCase(blueprintRepo) // 新增 Blueprint UseCase
 	uploadHandler := v1.NewUploadHandler(ingestService)
 	blueprintHandler := v1.NewBlueprintHandler(blueprintUC) // 新增 Blueprint Handler
-
 	temporalHost := os.Getenv("TEMPORAL_HOST")
 	if temporalHost == "" {
 		temporalHost = "localhost:7233"
@@ -145,8 +147,8 @@ func main() {
 
 	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo, sessionRepo)
 	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
-	dynamicActivities := activities.NewDynamicActivities(agentService, blueprintRepo, llmFactory, rdb) // 更新参数
-	wsHandler := http.NewWSHandler(rdb, tClient, blueprintUC)                                          // 新增 blueprintUC 参数
+	dynamicActivities := activities.NewDynamicActivities(agentService, blueprintRepo, llmFactory, rdb, chatRepo, sessionRepo)
+	wsHandler := http.NewWSHandler(rdb, tClient, blueprintUC) // 新增 blueprintUC 参数
 
 	// 初始化 Python 工具（必须在 worker 启动前完成）
 	if err := tools.InitPythonTool(); err != nil {
@@ -165,14 +167,10 @@ func main() {
 	w.RegisterWorkflow(workflow.ScheduledDataIngestion)
 	w.RegisterActivity(agentActivities.LoadChatHistory)
 	w.RegisterActivity(agentActivities.SaveChatTurn)
-	w.RegisterActivity(dynamicActivities.DynamicLLMGenerate)
-	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateWithBlueprint)
-	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateStream)
 	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateWithNodeConfig)       // 节点级别配置
 	w.RegisterActivity(dynamicActivities.DynamicLLMGenerateStreamWithNodeConfig) // 节点级别配置 + 流式
-	w.RegisterActivity(dynamicActivities.DynamicRouterDecide)
-	w.RegisterActivity(dynamicActivities.DynamicRouterDecideWithBlueprint)
-	w.RegisterActivity(dynamicActivities.DynamicRouterDecideWithNodeConfig) // 节点级别配置
+	w.RegisterActivity(dynamicActivities.DynamicRouterDecideWithNodeConfig)      // 节点级别配置
+	w.RegisterActivity(dynamicActivities.SaveBlueprintChatTurn)                  // Blueprint 会话保存
 	w.RegisterActivity(agentActivities.PublishStreamEvent)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {

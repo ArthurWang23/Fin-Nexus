@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"go-nexus/internal/domain"
 	"go-nexus/internal/infrastructure/llm"
+	"go-nexus/internal/infrastructure/search"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
 	"go-nexus/internal/usecase/tools"
+	"golang.org/x/sync/errgroup"
 	"strings"
 	"text/template"
 	"time"
@@ -19,10 +21,11 @@ import (
 
 // Reasoning + Acting 循环
 type AgentUseCase struct {
-	llmFactory *llm.LLMFactory
-	ragUC      *RAGUseCase
-	chatRepo   repo.ChatHistoryRepository
-	configRepo domain.ConfigRepository
+	llmFactory   *llm.LLMFactory
+	ragUC        *RAGUseCase
+	chatRepo     repo.ChatHistoryRepository
+	configRepo   domain.ConfigRepository
+	searchClient *search.TavilyClient
 }
 
 type SupervisorDecision struct {
@@ -32,8 +35,8 @@ type SupervisorDecision struct {
 	FinalAnswer string `json:"final_answer"`
 }
 
-func NewAgentUseCase(llmFactory *llm.LLMFactory, ragUC *RAGUseCase, chatRepo repo.ChatHistoryRepository, configRepo domain.ConfigRepository) *AgentUseCase {
-	return &AgentUseCase{llmFactory: llmFactory, ragUC: ragUC, chatRepo: chatRepo, configRepo: configRepo}
+func NewAgentUseCase(llmFactory *llm.LLMFactory, ragUC *RAGUseCase, chatRepo repo.ChatHistoryRepository, configRepo domain.ConfigRepository, tavilyClient *search.TavilyClient) *AgentUseCase {
+	return &AgentUseCase{llmFactory: llmFactory, ragUC: ragUC, chatRepo: chatRepo, configRepo: configRepo, searchClient: tavilyClient}
 }
 
 func (uc *AgentUseCase) ChatWithAgent(ctx context.Context, userQuery string) (string, error) {
@@ -186,7 +189,8 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, userID string, history []domain.Message) (*SupervisorDecision, error) {
 	tmpl, _ := template.New("sys").Parse(PromptSupervisor)
 	var buf bytes.Buffer
-	tmpl.Execute(&buf, map[string]string{"Query": query})
+	currentTime := time.Now().Format("2006-01-02 15:04:05")
+	tmpl.Execute(&buf, map[string]string{"Query": query, "CurrentTime": currentTime})
 
 	msgs := []domain.Message{
 		{Role: domain.RoleSystem, Content: buf.String()},
@@ -210,12 +214,53 @@ func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, userID
 
 func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string, userID string) (string, error) {
 	fmt.Printf(" Researcher is searching and summarizing: %s\n", instruction)
-	researcherClient := uc.GetClientForAgent(ctx, userID, domain.AgentResearcher)
-	answer, err := uc.ragUC.SearchAndChat(ctx, instruction, userID, researcherClient, PromptResearcher)
-	if err != nil {
-		return "", fmt.Errorf("researcher failed: %w", err)
+	var internalResult string
+	var webResult string
+	g, gCtx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		// 获取用户的 LLM Client
+		client := uc.GetClientForAgent(gCtx, userID, domain.AgentResearcher)
+		var err error
+		internalResult, err = uc.ragUC.SearchAndChat(gCtx, instruction, userID, client)
+		if err != nil {
+			fmt.Printf(" Internal search failed: %v\n", err)
+			internalResult = "内部数据库检索失败或无数据。"
+			return nil // 不阻断整体流程
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		var err error
+		webResult, err = uc.RunWebSearch(gCtx, instruction)
+		if err != nil {
+			fmt.Printf(" Web search failed: %v\n", err)
+			webResult = "联网搜索失败或无结果。"
+			return nil
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return "", err
 	}
-	return fmt.Sprintf("【研究员报告】:\n%s", answer), nil
+
+	tmpl, _ := template.New("lead_researcher").Parse(PromptResearcher)
+	var buf bytes.Buffer
+	tmpl.Execute(&buf, map[string]string{
+		"Query":          instruction,
+		"InternalReport": internalResult,
+		"WebReport":      webResult,
+	})
+
+	client := uc.GetClientForAgent(ctx, userID, domain.AgentResearcher)
+	finalReport, err := client.Chat(ctx, []domain.Message{
+		{Role: domain.RoleUser, Content: buf.String()},
+	})
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("【研究员报告】:\n%s", finalReport), nil
 }
 
 func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string, userID string) (string, error) {
@@ -336,4 +381,9 @@ func (uc *AgentUseCase) GetClientForAgent(ctx context.Context, userID string, ag
 		}
 	}
 	return uc.llmFactory.CreateClient(llmCfg)
+}
+
+func (uc *AgentUseCase) RunWebSearch(ctx context.Context, query string) (string, error) {
+	fmt.Printf(" Researcher is browsing the web: %s\n", query)
+	return uc.searchClient.Search(ctx, query)
 }

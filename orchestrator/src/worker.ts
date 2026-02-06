@@ -3,7 +3,7 @@ import * as path from 'path';
 
 async function run() {
     const temporalAddress = process.env.TEMPORAL_CLI_ADDRESS || 'localhost:7233';
-    const taskQueue = process.env.TEMPORAL_TASK_QUEUE || 'graph-task-queue';
+    const taskQueue = 'graph-task-queue';
     console.log(`[TS Worker] Connecting to Temporal Server at ${temporalAddress}...`);
     // Step 1: Register Workflows and Activities with the Worker and connect to
     // the Temporal server.

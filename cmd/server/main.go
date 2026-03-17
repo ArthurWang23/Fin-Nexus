@@ -148,7 +148,7 @@ func main() {
 	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo, sessionRepo)
 	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
 	dynamicActivities := activities.NewDynamicActivities(agentService, blueprintRepo, llmFactory, rdb, chatRepo, sessionRepo)
-	wsHandler := http.NewWSHandler(rdb, tClient, blueprintUC) // 新增 blueprintUC 参数
+	sseHandler := http.NewSSEHandler(rdb, tClient, blueprintUC)
 
 	// 初始化 Python 工具（必须在 worker 启动前完成）
 	if err := tools.InitPythonTool(); err != nil {
@@ -212,9 +212,14 @@ func main() {
 		protected.DELETE("/blueprints/:id", blueprintHandler.Delete)
 		protected.POST("/blueprints/:id/clone", blueprintHandler.Clone)
 		protected.POST("/blueprints/validate", blueprintHandler.Validate)
+
+		// SSE chat endpoints (POST requests carry JWT via Authorization header)
+		protected.POST("/chat/send", sseHandler.HandleChat)
+		protected.POST("/chat/blueprint", sseHandler.HandleBlueprintRun)
+		protected.POST("/chat/cancel", sseHandler.HandleCancel)
 	}
-	// websocket 不能传 header
-	public.GET("/ws/chat", wsHandler.HandleWS)
+	// SSE stream uses token query param (EventSource cannot set headers)
+	public.GET("/stream", sseHandler.HandleStream)
 	r.Static("/images", "./public/images")
 
 	// 服务器端口（优先使用环境变量）

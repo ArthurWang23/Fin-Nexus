@@ -174,6 +174,8 @@ func main() {
 	w.RegisterActivity(agentActivities.PublishStreamEvent)
 	w.RegisterActivity(agentActivities.CoderGenerateCode)
 	w.RegisterActivity(agentActivities.CoderExecuteCode)
+	w.RegisterWorkflow(workflow.PlanExecuteWorkflow)
+	w.RegisterActivity(agentActivities.PlannerDecide)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)

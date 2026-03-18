@@ -36,6 +36,21 @@ type SupervisorDecision struct {
 	FinalAnswer string `json:"final_answer"`
 }
 
+// PlanStep represents a single step in an execution plan.
+type PlanStep struct {
+	ID          int    `json:"id"`
+	Agent       string `json:"agent"` // "Coder" | "Researcher"
+	Instruction string `json:"instruction"`
+	DependsOn   []int  `json:"depends_on"`
+}
+
+// ExecutionPlan is the output of the Planner: a complete multi-step plan.
+type ExecutionPlan struct {
+	Thought     string     `json:"thought"`
+	Steps       []PlanStep `json:"steps"`
+	DirectReply string     `json:"direct_reply,omitempty"` // non-empty when no agent is needed
+}
+
 func NewAgentUseCase(llmFactory *llm.LLMFactory, ragUC *RAGUseCase, chatRepo repo.ChatHistoryRepository, configRepo domain.ConfigRepository, tavilyClient *search.TavilyClient) *AgentUseCase {
 	return &AgentUseCase{llmFactory: llmFactory, ragUC: ragUC, chatRepo: chatRepo, configRepo: configRepo, searchClient: tavilyClient}
 }
@@ -185,6 +200,33 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 		uc.chatRepo.AddMessage(ctx, sessionID, domain.Message{Role: domain.RoleAssistant, Content: finalAnswer})
 	}
 	return finalAnswer, nil
+}
+
+// CallPlanner generates a complete multi-step execution plan in one LLM call.
+func (uc *AgentUseCase) CallPlanner(ctx context.Context, query string, userID string, history []domain.Message) (*ExecutionPlan, error) {
+	tmpl, _ := template.New("planner").Parse(PromptPlanner)
+	var buf bytes.Buffer
+	currentTime := time.Now().Format("2006-01-02 15:04:05")
+	tmpl.Execute(&buf, map[string]string{"Query": query, "CurrentTime": currentTime})
+
+	msgs := []domain.Message{
+		{Role: domain.RoleSystem, Content: buf.String()},
+	}
+	msgs = append(msgs, history...)
+
+	supervisorClient := uc.GetClientForAgent(ctx, userID, domain.AgentSupervisor)
+	resp, err := supervisorClient.Chat(ctx, msgs)
+	if err != nil {
+		return nil, err
+	}
+	cleanJSON := CleanJSONBlock(resp)
+
+	var plan ExecutionPlan
+	if err := json.Unmarshal([]byte(cleanJSON), &plan); err != nil {
+		fmt.Printf("Plan JSON Parse Error: %s\nOriginal: %s\n", err, resp)
+		return nil, fmt.Errorf("planner output format error")
+	}
+	return &plan, nil
 }
 
 func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, userID string, history []domain.Message) (*SupervisorDecision, error) {

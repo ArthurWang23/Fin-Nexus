@@ -105,7 +105,7 @@ func (h *SSEHandler) HandleChat(c *gin.Context) {
 	_, err := h.tClient.ExecuteWorkflow(
 		context.Background(),
 		options,
-		workflow.StreamMultiAgentWorkflow,
+		workflow.PlanExecuteWorkflow,
 		req.Content,
 		req.SessionID,
 		req.SessionID,

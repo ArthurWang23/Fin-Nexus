@@ -51,6 +51,15 @@ func (a *AgentActivities) CoderRun(ctx context.Context, instruction string, user
 	return a.agentUC.RunCoder(ctx, instruction, userID)
 }
 
+// PlannerDecide generates a complete execution plan in one LLM call (Plan-Execute mode).
+func (a *AgentActivities) PlannerDecide(ctx context.Context, input SupervisorInput, streamID string) (*usecase.ExecutionPlan, error) {
+	a.publish(ctx, streamID, usecase.StreamMessage{
+		Type:    usecase.EventStep,
+		Content: "📋 正在制定执行计划...",
+	})
+	return a.agentUC.CallPlanner(ctx, input.Query, input.UserID, input.History)
+}
+
 // SupervisorDecideStream 支持流式的决策 Activity
 func (a *AgentActivities) SupervisorDecideStream(ctx context.Context, input SupervisorInput, streamID string) (*usecase.SupervisorDecision, error) {
 	// 发送状态更新
@@ -110,12 +119,12 @@ func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput)
 	if err != nil {
 		return err
 	}
-	err = a.chatRepo.AddMessage(ctx, input.SessionID, domain.Message{Role: domain.RoleAssistant, Content: input.FinalAnswer})
+	if err = a.chatRepo.AddMessage(ctx, input.SessionID, domain.Message{Role: domain.RoleAssistant, Content: input.FinalAnswer}); err != nil {
+		return fmt.Errorf("failed to save assistant message to chat history: %w", err)
+	}
 
 	_, err = a.sessionRepo.GetSessionByID(input.SessionID)
 	if err != nil {
-		// 假设找不到就是不存在 (Gorm error handling 简化处理)
-		// 创建新 Session
 		newSession := &domain.ChatSession{
 			ID:        input.SessionID,
 			UserID:    input.UserID,
@@ -134,7 +143,9 @@ func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput)
 		Content:   input.UserQuery,
 		CreatedAt: time.Now(),
 	}
-	a.sessionRepo.SaveMessage(userMsg)
+	if err := a.sessionRepo.SaveMessage(userMsg); err != nil {
+		return fmt.Errorf("failed to save user message: %w", err)
+	}
 	aiMsg := &domain.ChatMessage{
 		ID:        uuid.New().String(),
 		SessionID: input.SessionID,
@@ -142,7 +153,9 @@ func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput)
 		Content:   input.FinalAnswer,
 		CreatedAt: time.Now().Add(time.Second),
 	}
-	a.sessionRepo.SaveMessage(aiMsg)
+	if err := a.sessionRepo.SaveMessage(aiMsg); err != nil {
+		return fmt.Errorf("failed to save assistant message: %w", err)
+	}
 	return nil
 }
 

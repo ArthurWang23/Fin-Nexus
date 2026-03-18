@@ -1,5 +1,4 @@
 services:
-  # 1. 我们的 Go 应用
   app:
     build: .
     container_name: go_nexus_app

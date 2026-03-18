@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"go-nexus/internal/usecase"
-	"go-nexus/internal/workflow"
+	"go-nexus/internal/workflow" // for SignalApprove, ApprovalSignal
 	"go-nexus/pkg/auth"
 	"io"
 	"log"
@@ -54,6 +54,7 @@ func (h *SSEHandler) HandleStream(c *gin.Context) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
+	c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
 
 	connectedMsg, _ := json.Marshal(map[string]string{"type": "connected", "content": sessionID})
 	fmt.Fprintf(c.Writer, "data: %s\n\n", connectedMsg)
@@ -179,6 +180,48 @@ func (h *SSEHandler) HandleBlueprintRun(c *gin.Context) {
 // CancelRequest is the request body for cancelling an active workflow.
 type CancelRequest struct {
 	SessionID string `json:"session_id" binding:"required"`
+}
+
+// ApprovalRequest is the request body for approving or rejecting code execution.
+type ApprovalRequest struct {
+	SessionID    string `json:"session_id" binding:"required"`
+	Approved     bool   `json:"approved"`
+	Reason       string `json:"reason"`
+	ModifiedCode string `json:"modified_code,omitempty"`
+}
+
+// HandleApproval sends an approval/rejection Signal to the running Temporal workflow.
+// This resumes the workflow from its human-in-the-loop pause point.
+func (h *SSEHandler) HandleApproval(c *gin.Context) {
+	var req ApprovalRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	wfID, ok := activeWorkflows.Load(req.SessionID)
+	if !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No active workflow for this session"})
+		return
+	}
+
+	signal := workflow.ApprovalSignal{
+		Approved:     req.Approved,
+		Reason:       req.Reason,
+		ModifiedCode: req.ModifiedCode,
+	}
+	if err := h.tClient.SignalWorkflow(context.Background(), wfID.(string), "", workflow.SignalApprove, signal); err != nil {
+		log.Printf("Failed to signal workflow %s: %v", wfID, err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send approval signal"})
+		return
+	}
+
+	action := "approved"
+	if !req.Approved {
+		action = "rejected"
+	}
+	log.Printf("Workflow %s %s by user", wfID, action)
+	c.JSON(http.StatusOK, gin.H{"status": action})
 }
 
 // HandleCancel cancels the active workflow for a given session.

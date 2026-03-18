@@ -10,6 +10,7 @@ import (
 	"go-nexus/internal/infrastructure/search"
 	"go-nexus/internal/usecase/gateway"
 	"go-nexus/internal/usecase/repo"
+	"go-nexus/internal/usecase/skills"
 	"go-nexus/internal/usecase/tools"
 	"golang.org/x/sync/errgroup"
 	"strings"
@@ -264,7 +265,33 @@ func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string, u
 }
 
 func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string, userID string) (string, error) {
-	fmt.Printf("Coder is working on: %s\n", instruction)
+	code, err := uc.CoderGenerateCode(ctx, instruction, userID)
+	if err != nil {
+		return "", err
+	}
+	if code == "" {
+		return "Coder decided no code is needed for this task.", nil
+	}
+	return uc.CoderExecuteCode(ctx, code)
+}
+
+// CoderGenerateCode asks the LLM to produce Python code without executing it.
+// It matches the instruction against the Skill registry and injects relevant
+// verified code templates into the prompt for higher reliability.
+func (uc *AgentUseCase) CoderGenerateCode(ctx context.Context, instruction string, userID string) (string, error) {
+	fmt.Printf("Coder is generating code for: %s\n", instruction)
+
+	matched := skills.MatchSkills(instruction, 2)
+	systemPrompt := PromptCoder
+	if len(matched) > 0 {
+		names := make([]string, len(matched))
+		for i, s := range matched {
+			names[i] = s.Name
+		}
+		fmt.Printf("Matched skills: %v\n", names)
+		systemPrompt += skills.FormatForPrompt(matched)
+	}
+
 	toolsDefs := []gateway.ToolDefinition{
 		{
 			Name:        "run_python_code",
@@ -273,7 +300,7 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string, userID
 		},
 	}
 	msgs := []domain.Message{
-		{Role: domain.RoleSystem, Content: PromptCoder},
+		{Role: domain.RoleSystem, Content: systemPrompt},
 		{Role: domain.RoleUser, Content: instruction},
 	}
 
@@ -283,23 +310,31 @@ func (uc *AgentUseCase) RunCoder(ctx context.Context, instruction string, userID
 		return "", err
 	}
 	if len(resp.ToolCalls) == 0 {
-		return resp.Content, nil // 可能不需要写代码
+		return "", nil
 	}
-	// 执行工具
-	var sb strings.Builder
 	for _, call := range resp.ToolCalls {
 		if call.Name == "run_python_code" {
 			var args struct {
 				Code string `json:"code"`
 			}
-			_ = json.Unmarshal([]byte(call.Args), &args)
-
-			// 真正执行
-			output, files := tools.RunPythonCode(args.Code)
-			sb.WriteString(fmt.Sprintf("Code:\n%s\nOutput:\n%s\n", args.Code, output))
-			if len(files) > 0 {
-				sb.WriteString(fmt.Sprintf("Generated Files: %v\n", files))
+			if err := json.Unmarshal([]byte(call.Args), &args); err == nil && args.Code != "" {
+				return args.Code, nil
 			}
+		}
+	}
+	return "", nil
+}
+
+// CoderExecuteCode runs pre-generated Python code in the Docker sandbox.
+func (uc *AgentUseCase) CoderExecuteCode(ctx context.Context, code string) (string, error) {
+	fmt.Printf("Coder is executing code...\n")
+	output, files := tools.RunPythonCode(code)
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Code:\n%s\nOutput:\n%s\n", code, output))
+	if len(files) > 0 {
+		sb.WriteString("\n\n📊 Generated Files:\n")
+		for _, f := range files {
+			sb.WriteString(fmt.Sprintf("![chart](%s)\n", f))
 		}
 	}
 	return sb.String(), nil

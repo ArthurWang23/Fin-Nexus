@@ -146,6 +146,16 @@ func (a *AgentActivities) SaveChatTurn(ctx context.Context, input SaveChatInput)
 	return nil
 }
 
+// CoderGenerateCode asks LLM to produce Python code without executing.
+func (a *AgentActivities) CoderGenerateCode(ctx context.Context, instruction string, userID string) (string, error) {
+	return a.agentUC.CoderGenerateCode(ctx, instruction, userID)
+}
+
+// CoderExecuteCode runs pre-approved Python code in the Docker sandbox.
+func (a *AgentActivities) CoderExecuteCode(ctx context.Context, code string) (string, error) {
+	return a.agentUC.CoderExecuteCode(ctx, code)
+}
+
 func (a *AgentActivities) PublishStreamEvent(ctx context.Context, streamID string, msgType string, content string) error {
 	msg := usecase.StreamMessage{
 		Type:    usecase.StreamEventType(msgType),

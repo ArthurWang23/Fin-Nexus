@@ -172,6 +172,8 @@ func main() {
 	w.RegisterActivity(dynamicActivities.DynamicRouterDecideWithNodeConfig)      // 节点级别配置
 	w.RegisterActivity(dynamicActivities.SaveBlueprintChatTurn)                  // Blueprint 会话保存
 	w.RegisterActivity(agentActivities.PublishStreamEvent)
+	w.RegisterActivity(agentActivities.CoderGenerateCode)
+	w.RegisterActivity(agentActivities.CoderExecuteCode)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)
@@ -181,6 +183,9 @@ func main() {
 	briefUC := usecase.NewBriefUseCase(briefRepo, rdb)
 	briefHandler := v1.NewBriefHandler(briefUC)
 	configHandler := http.NewConfigHandler(configRepo)
+
+	// --- Temporal Schedule: Morning Brief (Mon-Fri 06:00 UTC) ---
+	initSchedules(tClient)
 
 	r := gin.Default()
 	public := r.Group("/api/v1")
@@ -217,9 +222,16 @@ func main() {
 		protected.POST("/chat/send", sseHandler.HandleChat)
 		protected.POST("/chat/blueprint", sseHandler.HandleBlueprintRun)
 		protected.POST("/chat/cancel", sseHandler.HandleCancel)
+		protected.POST("/chat/approve", sseHandler.HandleApproval)
 	}
 	// SSE stream uses token query param (EventSource cannot set headers)
 	public.GET("/stream", sseHandler.HandleStream)
+	r.Use(func(c *gin.Context) {
+		if len(c.Request.URL.Path) >= 7 && c.Request.URL.Path[:7] == "/images" {
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		c.Next()
+	})
 	r.Static("/images", "./public/images")
 
 	// 服务器端口（优先使用环境变量）
@@ -233,6 +245,31 @@ func main() {
 	fmt.Printf("Server running on port %s\n", port)
 	if err := r.Run(port); err != nil {
 		log.Fatal(err)
+	}
+}
+
+// initSchedules registers Temporal Schedules for recurring tasks.
+// If a schedule already exists (e.g. after app restart), creation is skipped gracefully.
+func initSchedules(tClient client.Client) {
+	ctx := context.Background()
+	scheduleClient := tClient.ScheduleClient()
+
+	_, err := scheduleClient.Create(ctx, client.ScheduleOptions{
+		ID: "morning-brief-daily",
+		Spec: client.ScheduleSpec{
+			CronExpressions: []string{"0 6 * * 1-5"}, // Mon-Fri 06:00 UTC
+		},
+		Action: &client.ScheduleWorkflowAction{
+			ID:        "scheduled-data-ingestion",
+			Workflow:  workflow.ScheduledDataIngestion,
+			TaskQueue: "agent-task-queue",
+		},
+	})
+	if err != nil {
+		// Schedule may already exist from a previous run — this is expected
+		log.Printf("Schedule 'morning-brief-daily': %v (may already exist)", err)
+	} else {
+		log.Println("Schedule 'morning-brief-daily' created (Mon-Fri 06:00 UTC)")
 	}
 }
 

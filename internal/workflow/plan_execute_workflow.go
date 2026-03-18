@@ -16,7 +16,9 @@ import (
 //
 //	Phase 1: One LLM call generates a complete execution plan
 //	Phase 2: Steps are executed in parallel where dependencies allow
-//	Phase 3: Results are aggregated into a final reply
+//	         - Context Injection: dependent steps receive prior results
+//	         - ApprovableAgent: two-phase (preview → approve → execute)
+//	Phase 3: Artifacts are sent to frontend, results aggregated into final reply
 func PlanExecuteWorkflow(ctx workflow.Context, userQuery string, streamID string, sessionID string, userID string) (string, error) {
 	ao := workflow.ActivityOptions{
 		StartToCloseTimeout: 5 * time.Minute,
@@ -47,8 +49,11 @@ func PlanExecuteWorkflow(ctx workflow.Context, userQuery string, streamID string
 		return "", fmt.Errorf("planning failed: %w", err)
 	}
 
-	// Handle direct reply (chitchat, no agents needed)
-	if plan.DirectReply != "" && len(plan.Steps) == 0 {
+	// Handle direct reply or empty plan (chitchat, no agents needed)
+	if len(plan.Steps) == 0 {
+		if plan.DirectReply == "" {
+			plan.DirectReply = "无需执行特定任务，请直接回答用户的问题。"
+		}
 		_ = publishEvent(ctx, streamID, "step", "直接回复（无需调度下属）")
 		promptForFinal := append(fullHistory, domain.Message{
 			Role:    domain.RoleSystem,
@@ -66,9 +71,7 @@ func PlanExecuteWorkflow(ctx workflow.Context, userQuery string, streamID string
 	_ = publishEvent(ctx, streamID, "step", fmt.Sprintf("📋 执行计划已生成，共 %d 个步骤", len(plan.Steps)))
 
 	// ── Phase 2: Execute (parallel where possible) ──
-	results := make(map[int]string) // stepID → result
-
-	// Build levels: group steps by execution order based on dependencies
+	results := make(map[int]*domain.AgentResult)
 	levels := buildLevels(plan.Steps)
 
 	for levelIdx, level := range levels {
@@ -80,30 +83,40 @@ func PlanExecuteWorkflow(ctx workflow.Context, userQuery string, streamID string
 				fmt.Sprintf(`{"id":%d,"status":"running"}`, step.ID))
 		}
 
-		// Launch all steps in this level concurrently
+		// ── Context Injection: build AgentInput with prior results for dependent steps ──
+		agentInputs := make(map[int]domain.AgentInput)
+		for _, step := range level {
+			agentInput := domain.AgentInput{
+				Instruction: step.Instruction,
+				UserID:      userID,
+			}
+			for _, depID := range step.DependsOn {
+				if r, ok := results[depID]; ok {
+					agentInput.PriorResults = append(agentInput.PriorResults, *r)
+				}
+			}
+			agentInputs[step.ID] = agentInput
+		}
+
+		// Launch all steps in this level concurrently via generic Activity names
 		futures := make(map[int]workflow.Future)
 		for _, step := range level {
-			s := step // capture
+			s := step
 			_ = publishEvent(ctx, streamID, "step",
 				fmt.Sprintf("▶ Step %d [%s]: %s", s.ID, s.Agent, s.Instruction))
 
-			switch s.Agent {
-			case "Coder":
-				futures[s.ID] = workflow.ExecuteActivity(ctx, "CoderGenerateCode", s.Instruction, userID)
-			case "Researcher":
-				futures[s.ID] = workflow.ExecuteActivity(ctx, "WorkerRunStream", "Researcher", s.Instruction, streamID, userID)
-			default:
-				_ = publishEvent(ctx, streamID, "step", fmt.Sprintf("⚠ Unknown agent: %s", s.Agent))
+			if s.RequiresApproval {
+				futures[s.ID] = workflow.ExecuteActivity(ctx, "AgentPreview", s.Agent, agentInputs[s.ID])
+			} else {
+				futures[s.ID] = workflow.ExecuteActivity(ctx, "AgentExecute", s.Agent, agentInputs[s.ID], streamID)
 			}
 		}
 
-		// Collect results: non-Coder steps first (they never block on user input),
-		// then Coder steps (which may wait for human approval).
-		// This prevents Coder approval from blocking the collection of already-finished results.
-		var coderSteps []usecase.PlanStep
+		// Collect non-approvable results first (they never block on user input)
+		var approvableSteps []usecase.PlanStep
 		for _, step := range level {
-			if step.Agent == "Coder" {
-				coderSteps = append(coderSteps, step)
+			if step.RequiresApproval {
+				approvableSteps = append(approvableSteps, step)
 				continue
 			}
 			f, ok := futures[step.ID]
@@ -111,51 +124,74 @@ func PlanExecuteWorkflow(ctx workflow.Context, userQuery string, streamID string
 				continue
 			}
 			stepStatus := "done"
-			var result string
+			var result domain.AgentResult
 			if err := f.Get(ctx, &result); err != nil {
-				results[step.ID] = fmt.Sprintf("Error: %v", err)
+				results[step.ID] = &domain.AgentResult{
+					AgentName: step.Agent, StepID: step.ID,
+					Summary: fmt.Sprintf("Error: %v", err), Error: err.Error(),
+				}
 				stepStatus = "error"
 			} else {
-				results[step.ID] = result
+				result.StepID = step.ID
+				results[step.ID] = &result
 			}
 			_ = publishEvent(ctx, streamID, string(usecase.EventStepComplete),
 				fmt.Sprintf(`{"id":%d,"status":"%s"}`, step.ID, stepStatus))
 		}
 
-		for _, step := range coderSteps {
+		// Then handle approvable steps (may wait for human approval signal)
+		for _, step := range approvableSteps {
 			f, ok := futures[step.ID]
 			if !ok {
 				continue
 			}
 			stepStatus := "done"
-			var generatedCode string
-			if err := f.Get(ctx, &generatedCode); err != nil {
-				results[step.ID] = fmt.Sprintf("Code generation failed: %v", err)
+			var previewContent string
+			if err := f.Get(ctx, &previewContent); err != nil {
+				results[step.ID] = &domain.AgentResult{
+					AgentName: step.Agent, StepID: step.ID,
+					Summary: fmt.Sprintf("Preview generation failed: %v", err), Error: err.Error(),
+				}
 				stepStatus = "error"
-			} else if generatedCode == "" {
-				results[step.ID] = "No code needed."
+			} else if previewContent == "" {
+				results[step.ID] = &domain.AgentResult{
+					AgentName: step.Agent, StepID: step.ID, Summary: "No action needed.",
+				}
 			} else {
-				_ = publishEvent(ctx, streamID, "approval_required", generatedCode)
+				// Send structured approval request with step identification
+				approvalPayload, _ := json.Marshal(map[string]interface{}{
+					"step_id": step.ID,
+					"agent":   step.Agent,
+					"code":    previewContent,
+				})
+				_ = publishEvent(ctx, streamID, "approval_required", string(approvalPayload))
 				approvalCh := workflow.GetSignalChannel(ctx, SignalApprove)
 				var signal ApprovalSignal
 				approvalCh.Receive(ctx, &signal)
 
 				if signal.Approved {
-					codeToRun := generatedCode
+					contentToRun := previewContent
 					if signal.ModifiedCode != "" {
-						codeToRun = signal.ModifiedCode
+						contentToRun = signal.ModifiedCode
 					}
-					_ = publishEvent(ctx, streamID, "step", "✅ 代码已批准，执行中...")
-					var execResult string
-					if err := workflow.ExecuteActivity(ctx, "CoderExecuteCode", codeToRun).Get(ctx, &execResult); err != nil {
-						results[step.ID] = fmt.Sprintf("Execution failed: %v", err)
+					_ = publishEvent(ctx, streamID, "step", "✅ 已批准，执行中...")
+					var execResult domain.AgentResult
+					if err := workflow.ExecuteActivity(ctx, "AgentExecuteApproved", step.Agent, contentToRun).Get(ctx, &execResult); err != nil {
+						results[step.ID] = &domain.AgentResult{
+							AgentName: step.Agent, StepID: step.ID,
+							Summary: fmt.Sprintf("Execution failed: %v", err), Error: err.Error(),
+						}
 						stepStatus = "error"
 					} else {
-						results[step.ID] = execResult
+						execResult.StepID = step.ID
+						results[step.ID] = &execResult
 					}
 				} else {
-					results[step.ID] = "User REJECTED: " + signal.Reason
-					_ = publishEvent(ctx, streamID, "step", "❌ 用户拒绝了代码执行")
+					results[step.ID] = &domain.AgentResult{
+						AgentName: step.Agent, StepID: step.ID,
+						Summary: "User REJECTED: " + signal.Reason,
+					}
+					_ = publishEvent(ctx, streamID, "step", "❌ 用户拒绝了执行")
 					stepStatus = "error"
 				}
 			}
@@ -164,13 +200,29 @@ func PlanExecuteWorkflow(ctx workflow.Context, userQuery string, streamID string
 		}
 	}
 
+	// ── Send structured artifacts to frontend ──
+	var allArtifacts []domain.Artifact
+	for _, r := range results {
+		if r != nil && len(r.Artifacts) > 0 {
+			allArtifacts = append(allArtifacts, r.Artifacts...)
+		}
+	}
+	if len(allArtifacts) > 0 {
+		artifactsJSON, _ := json.Marshal(allArtifacts)
+		_ = publishEvent(ctx, streamID, string(usecase.EventArtifacts), string(artifactsJSON))
+	}
+
 	// ── Phase 3: Final summary ──
 	var summaryHistory []domain.Message
 	summaryHistory = append(summaryHistory, fullHistory...)
 	for _, step := range plan.Steps {
+		summary := ""
+		if r, ok := results[step.ID]; ok && r != nil {
+			summary = r.Summary
+		}
 		summaryHistory = append(summaryHistory, domain.Message{
 			Role:    domain.RoleUser,
-			Content: fmt.Sprintf("【%s 汇报 (Step %d)】:\n%s", step.Agent, step.ID, results[step.ID]),
+			Content: fmt.Sprintf("【%s 汇报 (Step %d)】:\n%s", step.Agent, step.ID, summary),
 		})
 	}
 	summaryHistory = append(summaryHistory, domain.Message{
@@ -194,8 +246,8 @@ func buildLevels(steps []usecase.PlanStep) [][]usecase.PlanStep {
 	}
 
 	n := len(steps)
-	placedIdx := make([]bool, n)       // tracks by slice index
-	completedIDs := make(map[int]bool) // tracks completed step IDs for dependency resolution
+	placedIdx := make([]bool, n)
+	completedIDs := make(map[int]bool)
 	var levels [][]usecase.PlanStep
 	totalPlaced := 0
 

@@ -38,10 +38,11 @@ type SupervisorDecision struct {
 
 // PlanStep represents a single step in an execution plan.
 type PlanStep struct {
-	ID          int    `json:"id"`
-	Agent       string `json:"agent"` // "Coder" | "Researcher"
-	Instruction string `json:"instruction"`
-	DependsOn   []int  `json:"depends_on"`
+	ID               int    `json:"id"`
+	Agent            string `json:"agent"`
+	Instruction      string `json:"instruction"`
+	DependsOn        []int  `json:"depends_on"`
+	RequiresApproval bool   `json:"requires_approval,omitempty"` // enriched by PlannerDecide from AgentCard
 }
 
 // ExecutionPlan is the output of the Planner: a complete multi-step plan.
@@ -203,11 +204,12 @@ func (uc *AgentUseCase) MultiAgentChat(ctx context.Context, userQuery string, se
 }
 
 // CallPlanner generates a complete multi-step execution plan in one LLM call.
-func (uc *AgentUseCase) CallPlanner(ctx context.Context, query string, userID string, history []domain.Message) (*ExecutionPlan, error) {
-	tmpl, _ := template.New("planner").Parse(PromptPlanner)
+// agentDescriptions is dynamically built from the AgentRegistry.
+func (uc *AgentUseCase) CallPlanner(ctx context.Context, query string, userID string, history []domain.Message, agentDescriptions string) (*ExecutionPlan, error) {
+	tmpl := template.Must(template.New("planner").Parse(PromptPlanner))
 	var buf bytes.Buffer
 	currentTime := time.Now().Format("2006-01-02 15:04:05")
-	tmpl.Execute(&buf, map[string]string{"Query": query, "CurrentTime": currentTime})
+	tmpl.Execute(&buf, map[string]string{"Query": query, "CurrentTime": currentTime, "Agents": agentDescriptions})
 
 	msgs := []domain.Message{
 		{Role: domain.RoleSystem, Content: buf.String()},
@@ -226,11 +228,16 @@ func (uc *AgentUseCase) CallPlanner(ctx context.Context, query string, userID st
 		fmt.Printf("Plan JSON Parse Error: %s\nOriginal: %s\n", err, resp)
 		return nil, fmt.Errorf("planner output format error")
 	}
+	for i := range plan.Steps {
+		if plan.Steps[i].DependsOn == nil {
+			plan.Steps[i].DependsOn = []int{}
+		}
+	}
 	return &plan, nil
 }
 
 func (uc *AgentUseCase) CallSupervisor(ctx context.Context, query string, userID string, history []domain.Message) (*SupervisorDecision, error) {
-	tmpl, _ := template.New("sys").Parse(PromptSupervisor)
+	tmpl := template.Must(template.New("sys").Parse(PromptSupervisor))
 	var buf bytes.Buffer
 	currentTime := time.Now().Format("2006-01-02 15:04:05")
 	tmpl.Execute(&buf, map[string]string{"Query": query, "CurrentTime": currentTime})
@@ -288,7 +295,7 @@ func (uc *AgentUseCase) RunResearcher(ctx context.Context, instruction string, u
 		return "", err
 	}
 
-	tmpl, _ := template.New("lead_researcher").Parse(PromptResearcher)
+	tmpl := template.Must(template.New("lead_researcher").Parse(PromptResearcher))
 	var buf bytes.Buffer
 	tmpl.Execute(&buf, map[string]string{
 		"Query":          instruction,
@@ -405,7 +412,7 @@ func (uc *AgentUseCase) IngestKnowledge(ctx context.Context, text, filename stri
 }
 
 func (uc *AgentUseCase) GenerateMorningBrief(ctx context.Context, ticker, rawData string) (string, error) {
-	tmpl, _ := template.New("brief").Parse(PromptGenerateBrief)
+	tmpl := template.Must(template.New("brief").Parse(PromptGenerateBrief))
 	var buf bytes.Buffer
 
 	// 注入当前日期，解决“5分钟前”的问题
@@ -448,16 +455,7 @@ func extractGraphSafeContent(text string) string {
 }
 
 func (uc *AgentUseCase) GetClientForAgent(ctx context.Context, userID string, agentType domain.AgentType) gateway.LLMClient {
-	userConfig, err := uc.configRepo.GetConfig(userID, agentType)
-	var llmCfg *gateway.LLMConfig
-	if err == nil && userConfig != nil {
-		llmCfg = &gateway.LLMConfig{
-			APIKey:    userConfig.APIKey,
-			BaseURL:   userConfig.BaseURL,
-			ModelName: userConfig.ModelName,
-		}
-	}
-	return uc.llmFactory.CreateClient(llmCfg)
+	return GetLLMClient(uc.llmFactory, uc.configRepo, userID, agentType)
 }
 
 func (uc *AgentUseCase) RunWebSearch(ctx context.Context, query string) (string, error) {

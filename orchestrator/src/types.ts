@@ -102,10 +102,41 @@ export interface ValidationResult {
 }
 
 // ============================================
+// Agent 架构类型（与 Go domain 对齐）
+// ============================================
+
+export interface AgentInput {
+    instruction: string;
+    prior_results?: AgentResult[];
+    user_id: string;
+}
+
+export interface Artifact {
+    type: string;        // "image", "code", "table", "text"
+    content?: string;
+    file_path?: string;
+    title?: string;
+}
+
+export interface AgentResult {
+    agent_name: string;
+    step_id?: number;
+    summary: string;
+    artifacts?: Artifact[];
+    error?: string;
+}
+
+export interface ApprovalSignal {
+    approved: boolean;
+    reason?: string;
+    modified_code?: string;
+}
+
+// ============================================
 // 流式事件类型
 // ============================================
 
-export type StreamEventType = 'step' | 'token' | 'error' | 'done';
+export type StreamEventType = 'step' | 'token' | 'error' | 'done' | 'approval_required' | 'plan' | 'step_complete' | 'artifacts' | 'agent_output';
 
 export interface StreamEvent {
     type: StreamEventType;

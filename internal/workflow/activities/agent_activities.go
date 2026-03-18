@@ -19,6 +19,7 @@ type AgentActivities struct {
 	rdb         *redis.Client
 	chatRepo    repo.ChatHistoryRepository
 	sessionRepo domain.SessionRepository
+	registry    *usecase.AgentRegistry
 }
 
 type SupervisorInput struct {
@@ -35,8 +36,8 @@ type SaveChatInput struct {
 	FinalAnswer string
 }
 
-func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client, chatRepo repo.ChatHistoryRepository, sessionRepo domain.SessionRepository) *AgentActivities {
-	return &AgentActivities{agentUC, rdb, chatRepo, sessionRepo}
+func NewAgentActivities(agentUC *usecase.AgentUseCase, rdb *redis.Client, chatRepo repo.ChatHistoryRepository, sessionRepo domain.SessionRepository, registry *usecase.AgentRegistry) *AgentActivities {
+	return &AgentActivities{agentUC: agentUC, rdb: rdb, chatRepo: chatRepo, sessionRepo: sessionRepo, registry: registry}
 }
 
 func (a *AgentActivities) SupervisorDecide(ctx context.Context, input SupervisorInput) (*usecase.SupervisorDecision, error) {
@@ -52,12 +53,65 @@ func (a *AgentActivities) CoderRun(ctx context.Context, instruction string, user
 }
 
 // PlannerDecide generates a complete execution plan in one LLM call (Plan-Execute mode).
+// It dynamically injects agent descriptions from the registry and enriches the plan
+// with RequiresApproval metadata from each agent's Card.
 func (a *AgentActivities) PlannerDecide(ctx context.Context, input SupervisorInput, streamID string) (*usecase.ExecutionPlan, error) {
 	a.publish(ctx, streamID, usecase.StreamMessage{
 		Type:    usecase.EventStep,
 		Content: "📋 正在制定执行计划...",
 	})
-	return a.agentUC.CallPlanner(ctx, input.Query, input.UserID, input.History)
+	agentDescriptions := a.registry.BuildAgentDescriptions()
+	plan, err := a.agentUC.CallPlanner(ctx, input.Query, input.UserID, input.History, agentDescriptions)
+	if err != nil {
+		return nil, err
+	}
+	for i, step := range plan.Steps {
+		if agent, ok := a.registry.Get(step.Agent); ok {
+			plan.Steps[i].RequiresApproval = agent.Card().RequiresApproval
+		}
+	}
+	return plan, nil
+}
+
+// AgentExecute runs any registered agent through the standardized Agent interface.
+func (a *AgentActivities) AgentExecute(ctx context.Context, agentName string, input domain.AgentInput, streamID string) (*domain.AgentResult, error) {
+	agent, ok := a.registry.Get(agentName)
+	if !ok {
+		return nil, fmt.Errorf("unknown agent: %s", agentName)
+	}
+	a.publish(ctx, streamID, usecase.StreamMessage{
+		Type:    usecase.EventStep,
+		Content: fmt.Sprintf("%s 正在执行: %s", agentName, input.Instruction),
+	})
+	return agent.Execute(ctx, input)
+}
+
+// AgentPreview calls an ApprovableAgent's Preview method to generate
+// content for human review (e.g., Coder generates Python code).
+func (a *AgentActivities) AgentPreview(ctx context.Context, agentName string, input domain.AgentInput) (string, error) {
+	agent, ok := a.registry.Get(agentName)
+	if !ok {
+		return "", fmt.Errorf("unknown agent: %s", agentName)
+	}
+	approvable, ok := agent.(domain.ApprovableAgent)
+	if !ok {
+		return "", fmt.Errorf("agent %s does not support preview", agentName)
+	}
+	return approvable.Preview(ctx, input)
+}
+
+// AgentExecuteApproved calls an ApprovableAgent's ExecuteApproved method
+// to run content that has been reviewed and approved by the user.
+func (a *AgentActivities) AgentExecuteApproved(ctx context.Context, agentName string, approvedContent string) (*domain.AgentResult, error) {
+	agent, ok := a.registry.Get(agentName)
+	if !ok {
+		return nil, fmt.Errorf("unknown agent: %s", agentName)
+	}
+	approvable, ok := agent.(domain.ApprovableAgent)
+	if !ok {
+		return nil, fmt.Errorf("agent %s does not support approved execution", agentName)
+	}
+	return approvable.ExecuteApproved(ctx, approvedContent)
 }
 
 // SupervisorDecideStream 支持流式的决策 Activity

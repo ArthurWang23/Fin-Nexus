@@ -128,7 +128,10 @@ func main() {
 	tavily_key := os.Getenv("TAVILY_API_KEY")
 	tavilyClient := search.NewTavilyClient(tavily_key)
 	agentService := usecase.NewAgentUseCase(llmFactory, ragService, chatRepo, configRepo, tavilyClient)
-	blueprintUC := usecase.NewBlueprintUseCase(blueprintRepo) // 新增 Blueprint UseCase
+	registry := usecase.NewAgentRegistry()
+	registry.Register(usecase.NewCoderAgent(llmFactory, configRepo))
+	registry.Register(usecase.NewResearcherAgent(ragService, tavilyClient, llmFactory, configRepo))
+	blueprintUC := usecase.NewBlueprintUseCase(blueprintRepo)
 	uploadHandler := v1.NewUploadHandler(ingestService)
 	blueprintHandler := v1.NewBlueprintHandler(blueprintUC) // 新增 Blueprint Handler
 	temporalHost := os.Getenv("TEMPORAL_HOST")
@@ -145,7 +148,7 @@ func main() {
 	defer tClient.Close()
 	w := worker.New(tClient, "agent-task-queue", worker.Options{})
 
-	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo, sessionRepo)
+	agentActivities := activities.NewAgentActivities(agentService, rdb, chatRepo, sessionRepo, registry)
 	dataActivities := activities.NewDataActivities(agentService, briefRepo, rdb)
 	dynamicActivities := activities.NewDynamicActivities(agentService, blueprintRepo, llmFactory, rdb, chatRepo, sessionRepo)
 	sseHandler := http.NewSSEHandler(rdb, tClient, blueprintUC)
@@ -176,6 +179,9 @@ func main() {
 	w.RegisterActivity(agentActivities.CoderExecuteCode)
 	w.RegisterWorkflow(workflow.PlanExecuteWorkflow)
 	w.RegisterActivity(agentActivities.PlannerDecide)
+	w.RegisterActivity(agentActivities.AgentExecute)
+	w.RegisterActivity(agentActivities.AgentPreview)
+	w.RegisterActivity(agentActivities.AgentExecuteApproved)
 	go func() {
 		if err := w.Run(worker.InterruptCh()); err != nil {
 			log.Fatalf("Unable to start worker: %v", err)

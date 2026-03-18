@@ -1,4 +1,4 @@
-import { proxyActivities, log } from '@temporalio/workflow';
+import { proxyActivities, defineSignal, setHandler, condition, log } from '@temporalio/workflow';
 import {
     WorkflowBlueprint,
     GraphNode,
@@ -6,7 +6,10 @@ import {
     ToolNodeConfig,
     RouterNodeConfig,
     ExecutionState,
-    NodeLLMConfig
+    NodeLLMConfig,
+    AgentInput,
+    AgentResult,
+    ApprovalSignal,
 } from './types';
 
 // ============================================
@@ -54,9 +57,14 @@ interface GoActivities {
         userId: string
     ): Promise<string>;
 
-    // 工具调用
+    // 旧版工具调用（保留向后兼容）
     ResearcherSearch(instruction: string, userId: string): Promise<string>;
     CoderRun(instruction: string, userId: string): Promise<string>;
+
+    // 新版 Agent Registry 调用
+    AgentExecute(agentName: string, input: AgentInput, streamId: string): Promise<AgentResult>;
+    AgentPreview(agentName: string, input: AgentInput): Promise<string>;
+    AgentExecuteApproved(agentName: string, approvedContent: string): Promise<AgentResult>;
 
     // 流式事件发布
     PublishStreamEvent(sessionId: string, msgType: string, content: string): Promise<void>;
@@ -88,12 +96,24 @@ export interface GraphExecutionInput {
     enableStreaming?: boolean;  // 是否启用流式输出
 }
 
+// Approval signal — same name as Go's SignalApprove constant
+const approveSignal = defineSignal<[ApprovalSignal]>('APPROVE_SIGNAL');
+
+// Agent name mapping: Blueprint tool_name → Registry agent name
+const TOOL_AGENT_MAP: Record<string, string> = {
+    'researcher': 'Researcher',
+    'coder': 'Coder',
+};
+
+// Agents that require human approval before execution
+const APPROVABLE_AGENTS = new Set(['Coder']);
+
 /**
  * GraphExecutionWorkflow - 图执行工作流
  * 
  * 根据用户定义的 Blueprint 执行节点序列，支持：
  * - LLM 节点：调用 LLM 生成内容
- * - Tool 节点：调用工具（researcher, coder, fetch_data）
+ * - Tool 节点：通过 AgentRegistry 调用（含 Skill Registry、人工审批、结构化输出）
  * - Router 节点：条件路由
  * - 模板变量替换：{{variable}}
  * - 流式输出支持
@@ -107,6 +127,12 @@ export async function GraphExecutionWorkflow(
 ): Promise<string> {
     log.info(`[GraphEngine] Started. User: ${userId}, Blueprint: ${blueprint.id}, SessionId: ${sessionId}`);
 
+    // Signal state for human-in-the-loop approval
+    let pendingApproval: ApprovalSignal | null = null;
+    setHandler(approveSignal, (signal: ApprovalSignal) => {
+        pendingApproval = signal;
+    });
+
     // 初始化执行状态
     const state: ExecutionState = {
         "global_input": initialInput,
@@ -115,7 +141,7 @@ export async function GraphExecutionWorkflow(
 
     let currentNodeId: string | undefined = blueprint.start_node_id;
     let stepsCount = 0;
-    const maxSteps = 50;  // 防止无限循环
+    const maxSteps = 50;
 
     while (currentNodeId && currentNodeId !== 'END' && stepsCount < maxSteps) {
         const node = blueprint.nodes.find(n => n.id === currentNodeId);
@@ -123,7 +149,6 @@ export async function GraphExecutionWorkflow(
             throw new Error(`Node ${currentNodeId} not found in blueprint`);
         }
 
-        // 发布步骤事件
         await activities.PublishStreamEvent(
             streamId,
             'step',
@@ -141,22 +166,16 @@ export async function GraphExecutionWorkflow(
 
                 case 'LLM': {
                     const cfg = node.config as LLMNodeConfig;
-                    // 将 last_output 映射为 input 供模板使用
                     const templateState = { ...state, input: state["last_output"] };
                     const prompt = fillTemplate(cfg.template, templateState);
-
-                    // 转换节点配置为 Go 格式
                     const nodeConfig = convertNodeConfig(cfg.llm_config);
 
-                    // 判断是否为最终输出节点（连接到 End 节点的 LLM 节点）
-                    // 最终输出使用 "token" 类型，内部节点使用 "agent_output" 类型
                     const isConnectedToEnd = blueprint.edges.some(
                         e => e.source === node.id &&
                             blueprint.nodes.find(n => n.id === e.target)?.type === 'End'
                     );
                     const msgType = isConnectedToEnd ? 'token' : 'agent_output';
 
-                    // 检查是否启用流式输出
                     if (cfg.streaming) {
                         output = await activities.DynamicLLMGenerateStreamWithNodeConfig(
                             nodeConfig,
@@ -168,7 +187,6 @@ export async function GraphExecutionWorkflow(
                             userId
                         );
                     } else {
-                        // 使用节点配置 + Blueprint 回退 + 用户默认配置
                         output = await activities.DynamicLLMGenerateWithNodeConfig(
                             nodeConfig,
                             blueprint.id,
@@ -176,7 +194,6 @@ export async function GraphExecutionWorkflow(
                             prompt,
                             userId
                         );
-                        // 非流式模式下，也发布输出内容以便前端展示
                         await activities.PublishStreamEvent(streamId, msgType, output);
                     }
                     log.info(`[GraphEngine] LLM node ${node.id} output length: ${output.length}, msgType: ${msgType}`);
@@ -185,27 +202,71 @@ export async function GraphExecutionWorkflow(
 
                 case 'Tool': {
                     const cfg = node.config as ToolNodeConfig;
-                    // 将 last_output 映射为 input 供模板使用
                     const templateState = { ...state, input: state["last_output"] };
-                    const input = fillTemplate(cfg.input_template, templateState);
+                    const instruction = fillTemplate(cfg.input_template, templateState);
+
+                    const agentName = TOOL_AGENT_MAP[cfg.tool_name];
+                    if (!agentName) {
+                        output = `Error: Unknown tool '${cfg.tool_name}'`;
+                        break;
+                    }
 
                     await activities.PublishStreamEvent(
-                        streamId,
-                        'step',
-                        `正在执行工具: ${cfg.tool_name}`
+                        streamId, 'step',
+                        `正在通过 ${agentName} Agent 执行: ${cfg.tool_name}`
                     );
 
-                    switch (cfg.tool_name) {
-                        case 'researcher':
-                            output = await activities.ResearcherSearch(input, userId);
-                            break;
-                        case 'coder':
-                            output = await activities.CoderRun(input, userId);
-                            break;
-                        default:
-                            output = `Error: Unknown tool '${cfg.tool_name}'`;
+                    const agentInput: AgentInput = {
+                        instruction,
+                        user_id: userId,
+                    };
+
+                    if (APPROVABLE_AGENTS.has(agentName)) {
+                        // Approvable agent (e.g. Coder): Preview → Approval → Execute
+                        const previewCode = await activities.AgentPreview(agentName, agentInput);
+
+                        if (!previewCode) {
+                            output = "No code needed for this task.";
+                        } else {
+                            // Send code for human review
+                            await activities.PublishStreamEvent(
+                                streamId, 'approval_required',
+                                JSON.stringify({ agent: agentName, code: previewCode })
+                            );
+
+                            // Wait for user decision
+                            pendingApproval = null;
+                            await condition(() => pendingApproval !== null);
+
+                            if (pendingApproval!.approved) {
+                                const codeToRun = pendingApproval!.modified_code || previewCode;
+                                await activities.PublishStreamEvent(streamId, 'step', '✅ 已批准，执行中...');
+                                const result: AgentResult = await activities.AgentExecuteApproved(agentName, codeToRun);
+                                output = result.summary;
+                                if (result.artifacts?.length) {
+                                    await activities.PublishStreamEvent(
+                                        streamId, 'artifacts',
+                                        JSON.stringify(result.artifacts)
+                                    );
+                                }
+                            } else {
+                                const reason = pendingApproval!.reason || '';
+                                await activities.PublishStreamEvent(streamId, 'step', '❌ 用户拒绝了执行');
+                                output = `User rejected execution. Reason: ${reason}`;
+                            }
+                        }
+                    } else {
+                        // Non-approvable agent (e.g. Researcher): direct execution
+                        const result: AgentResult = await activities.AgentExecute(agentName, agentInput, streamId);
+                        output = result.summary;
+                        if (result.artifacts?.length) {
+                            await activities.PublishStreamEvent(
+                                streamId, 'artifacts',
+                                JSON.stringify(result.artifacts)
+                            );
+                        }
                     }
-                    // 发布工具输出（使用 agent_output 显示在可折叠区块）
+
                     await activities.PublishStreamEvent(streamId, 'agent_output', `[Tool: ${cfg.tool_name}]\n${output}`);
                     break;
                 }
@@ -214,7 +275,6 @@ export async function GraphExecutionWorkflow(
                     const cfg = node.config as RouterNodeConfig;
                     const input = state["last_output"];
 
-                    // Router 也可以有自己的 LLM 配置（用于决策的模型）
                     const nodeConfig = (cfg as any).llm_config
                         ? convertNodeConfig((cfg as any).llm_config)
                         : null;
@@ -232,21 +292,16 @@ export async function GraphExecutionWorkflow(
                     nextCondition = choice;
 
                     await activities.PublishStreamEvent(
-                        streamId,
-                        'step',
+                        streamId, 'step',
                         `路由决策: ${choice}`
                     );
                     break;
                 }
 
                 case 'End':
-                    // 保存会话
                     if (sessionId) {
                         await activities.SaveBlueprintChatTurn(
-                            sessionId,
-                            userId,
-                            initialInput,
-                            state["last_output"]
+                            sessionId, userId, initialInput, state["last_output"]
                         );
                     }
                     await activities.PublishStreamEvent(streamId, 'done', 'completed');
@@ -256,38 +311,29 @@ export async function GraphExecutionWorkflow(
             const errorMsg = `Error in node ${node.id}: ${err.message}`;
             log.error(errorMsg);
             await activities.PublishStreamEvent(streamId, 'error', errorMsg);
-            // 变更：遇到错误直接抛出，终止工作流，而不是继续执行
             throw new Error(errorMsg);
         }
 
-        // 更新状态
         state[`${node.id}.output`] = output;
         state["last_output"] = output;
 
-        // 导航到下一个节点
         const prevNodeId = currentNodeId;
         currentNodeId = findNextNode(blueprint, node, nextCondition);
         log.info(`[GraphEngine] Navigation: ${prevNodeId} -> ${currentNodeId} (condition: ${nextCondition})`);
         stepsCount++;
     }
 
-    // 保存会话（工作流通过主循环退出时）
     if (sessionId) {
         await activities.SaveBlueprintChatTurn(
-            sessionId,
-            userId,
-            initialInput,
-            state["last_output"]
+            sessionId, userId, initialInput, state["last_output"]
         );
     }
 
-    // 发送完成事件
     await activities.PublishStreamEvent(streamId, 'done', state["last_output"]);
 
     if (stepsCount >= maxSteps) {
         log.warn(`[GraphEngine] Max steps reached (${maxSteps}), workflow terminated`);
     }
-
 
     return state["last_output"];
 }
